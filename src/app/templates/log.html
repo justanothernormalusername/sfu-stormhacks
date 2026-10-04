@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Log · Task Dungeon{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Adventure Log: <span id="who">{{ target }}</span></h1>
+  <p class="muted">Every completion is timestamped by the server and can't be edited. Party members can flag anything that looks fishy.</p>
+  <ul id="log" class="list"></ul>
+  <p id="empty" class="muted" hidden>Nothing logged yet.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const target = {{ target | tojson }};
+const isMe = target === {{ user.username | tojson }};
+
+async function render() {
+  const entries = await api(`/api/log?username=${encodeURIComponent(target)}`);
+  const list = document.getElementById("log");
+  list.replaceChildren();
+  document.getElementById("empty").hidden = entries.length > 0;
+  for (const entry of entries) {
+    const li = el("li", { class: "item kind-" + entry.kind + (entry.flagged ? " flagged" : "") });
+    li.append(
+      el("span", { class: "time" }, new Date(entry.completed_at).toLocaleString()),
+      el("span", { class: "grow" }, entry.task + (entry.note ? ` · "${entry.note}"` : "")),
+    );
+    if (entry.flagged) {
+      li.append(el("span", { class: "error" }, "⚑ Flagged"));
+    } else if (!isMe) {
+      const btn = el("button", { class: "secondary" }, "⚑ Flag");
+      btn.onclick = async () => {
+        await api(`/api/completions/${entry.id}/flag`, { method: "POST" });
+        render();
+      };
+      li.append(btn);
+    }
+    list.append(li);
+  }
+}
+render().catch((err) => {
+  const empty = document.getElementById("empty");
+  empty.textContent = err.message;
+  empty.hidden = false;
+});
+</script>
+{% endblock %}

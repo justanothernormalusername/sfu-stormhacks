@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+jinja2
+itsdangerous
+python-multipart
+psycopg[binary]
+tzdata

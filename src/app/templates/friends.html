@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Party · Task Dungeon{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Your Party</h1>
+  <form id="add-friend" class="row">
+    <input name="username" placeholder="Friend's username" required>
+    <button>Invite to party</button>
+  </form>
+  <p id="msg" class="muted"></p>
+</section>
+<section class="panel">
+  <h2>Weekly Leaderboard</h2>
+  <ol id="board" class="list"></ol>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+async function render() {
+  const board = await api("/api/leaderboard");
+  const list = document.getElementById("board");
+  list.replaceChildren();
+  board.forEach((row, i) => {
+    const li = el("li", { class: "item" + (row.is_you ? " you" : "") });
+    li.append(
+      el("span", { class: "rank" }, ["🥇", "🥈", "🥉"][i] ?? `#${i + 1}`),
+      el("span", { class: "grow" }, `${row.username}${row.is_you ? " (you)" : ""}`),
+      el("span", { class: "tag" }, `Lv ${row.level}`),
+      el("span", { class: "xp" }, `${row.weekly_xp} XP`),
+      el("a", { href: `/log?username=${encodeURIComponent(row.username)}` }, "View log"),
+    );
+    list.append(li);
+  });
+}
+
+document.getElementById("add-friend").onsubmit = async (e) => {
+  e.preventDefault();
+  const username = new FormData(e.target).get("username");
+  const msg = document.getElementById("msg");
+  try {
+    await api("/api/friends", { method: "POST", body: { username } });
+    msg.textContent = `${username} joined your party!`;
+    e.target.reset();
+    render();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+};
+render();
+</script>
+{% endblock %}

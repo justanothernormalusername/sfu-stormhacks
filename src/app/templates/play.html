@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Dungeon · Task Dungeon{% endblock %}
+{% block content %}
+<div id="hud" class="panel">
+  <span class="tag" id="hud-level">Lv 1</span>
+  <span>HP <span class="bar"><div id="hp-fill"></div></span> <span id="hud-hp"></span></span>
+  <span>XP <span class="bar"><div id="xp-fill"></div></span> <span id="hud-xp"></span></span>
+  <span>ATK <b id="hud-atk"></b> · DEF <b id="hud-def"></b></span>
+  <span class="muted" id="hud-items"></span>
+</div>
+<div id="game"></div>
+<p class="controls">Move: WASD / arrow keys · Battle: 1 Attack · 2 Power Strike · 3 Defend · Esc Flee</p>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script src="/static/game/main.js"></script>
+{% endblock %}

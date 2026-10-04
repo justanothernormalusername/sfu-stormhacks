@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel narrow">
+  <h1>Enter the Dungeon</h1>
+  <p class="muted">Your real-life quests are the only key to the doors below.</p>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <label>Username <input name="username" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <div class="row">
+      <button name="action" value="login">Log in</button>
+      <button name="action" value="register" class="secondary">New hero</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

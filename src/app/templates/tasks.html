@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Quests · Task Dungeon{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Quest Board</h1>
+  <p class="muted">Every quest becomes a room. Finish it in real life to unlock the door.</p>
+  <form id="new-task" class="row">
+    <input name="title" placeholder="e.g. Go for a 20 min run" required maxlength="120">
+    <select name="kind">
+      <option value="daily">Daily · mob · 10 XP</option>
+      <option value="monthly">Monthly · mini-boss · 50 XP</option>
+      <option value="goal">Goal · boss · 200 XP</option>
+    </select>
+    <button>Add quest</button>
+  </form>
+</section>
+<section class="panel">
+  <ul id="tasks" class="list"></ul>
+  <p id="empty" class="muted" hidden>No quests yet. Add one above to build your first room.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const KIND_LABEL = { daily: "Daily", monthly: "Monthly", goal: "Goal" };
+
+async function render() {
+  const rooms = await api("/api/rooms");
+  const list = document.getElementById("tasks");
+  list.replaceChildren();
+  document.getElementById("empty").hidden = rooms.length > 0;
+  for (const room of rooms) {
+    const li = el("li", { class: "item kind-" + room.kind });
+    li.append(
+      el("span", { class: "tag" }, KIND_LABEL[room.kind]),
+      el("span", { class: "grow" }, room.title),
+    );
+    if (room.unlocked) {
+      li.append(el("span", { class: "done" }, room.cleared ? "✔ Cleared" : "🔓 Door open"));
+    } else {
+      const btn = el("button", {}, "I did it");
+      btn.onclick = async () => {
+        const note = prompt("Optional note for your party (what did you do?)") ?? "";
+        await api(`/api/tasks/${room.task_id}/complete`, { method: "POST", body: { note } });
+        render();
+      };
+      li.append(btn);
+    }
+    const archive = el("button", { class: "icon", title: "Archive quest" }, "✕");
+    archive.onclick = async () => {
+      if (confirm("Archive this quest? Its history stays in the log.")) {
+        await api(`/api/tasks/${room.task_id}`, { method: "DELETE" });
+        render();
+      }
+    };
+    li.append(archive);
+    list.append(li);
+  }
+}
+
+document.getElementById("new-task").onsubmit = async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target);
+  await api("/api/tasks", { method: "POST", body: { title: form.get("title"), kind: form.get("kind") } });
+  e.target.reset();
+  render();
+};
+render();
+</script>
+{% endblock %}
