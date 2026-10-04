@@ -133,16 +133,14 @@ def _classifier_key() -> str | None:
 WEEK_START_DAY = 0  # 0=Monday .. 6=Sunday
 
 # --- The floor --------------------------------------------------------------
-# The map is *authored* here rather than generated, because a good dungeon is a
-# designed sequence of beats — an opening, a fork, somewhere to breathe, a
-# locked-feeling finale — and not twelve rooms in a row. Coordinates are in
-# tiles, origin top-left; a room occupies x..x+w-1, y..y+h-1.
+# The floor is a straight run of rooms separated by short walkways. Coordinates
+# are in tiles, origin top-left; a room occupies x..x+w-1, y..y+h-1.
 #
 # What lives in each room is still seeded per week (see `game.floor_for_week`):
 # creature names, flavour, and the weekly modifier are drawn fresh, so every
 # player walks the same map and gets a different week.
-WORLD_COLS = 44
-WORLD_ROWS = 22
+WORLD_COLS = 130
+WORLD_ROWS = 11
 
 FLOOR_NAME = "Floor 1 · The Root Datacenter"
 FLOOR_THEME = "A dead machine-cathedral. The lights still flicker because something down here is awake."
@@ -152,18 +150,18 @@ FLOOR_THEME = "A dead machine-cathedral. The lights still flicker because someth
 # early rooms, and the boss is always the hardest thing on the floor.
 FLOOR_ROOMS = (
     # name, kind, x, y, w, h, depth
-    ("The Entry Stair", "entrance", 1, 10, 5, 5, 0),
-    ("Flooded Barracks", "combat", 8, 3, 5, 4, 1),
-    ("The Rust Hatch", "combat", 8, 16, 5, 4, 2),
-    ("Collapsed Server Farm", "combat", 15, 9, 6, 5, 3),
-    ("Ashfall Corridor", "combat", 15, 1, 5, 4, 3),
-    ("Drowned Archives", "combat", 15, 17, 5, 4, 4),
-    ("The Null Chapel", "shrine", 23, 4, 5, 5, 5),
-    ("Bleeding Cores", "combat", 23, 14, 5, 5, 6),
-    ("The Overclock", "elite", 30, 1, 5, 4, 7),
-    ("Broken Consensus", "combat", 30, 10, 5, 4, 8),
-    ("The Thermal Vault", "gate", 30, 17, 5, 4, 9),
-    ("The Root Chamber", "boss", 37, 6, 6, 10, 10),
+    ("The Entry Stair", "entrance", 1, 1, 7, 9, 0),
+    ("Flooded Barracks", "combat", 12, 1, 7, 9, 1),
+    ("The Rust Hatch", "combat", 23, 1, 7, 9, 2),
+    ("Collapsed Server Farm", "combat", 34, 1, 7, 9, 3),
+    ("Ashfall Corridor", "combat", 45, 1, 7, 9, 3),
+    ("Drowned Archives", "combat", 56, 1, 7, 9, 4),
+    ("The Null Chapel", "shrine", 67, 1, 7, 9, 5),
+    ("Bleeding Cores", "combat", 78, 1, 7, 9, 6),
+    ("The Overclock", "elite", 89, 1, 7, 9, 7),
+    ("Broken Consensus", "combat", 100, 1, 7, 9, 8),
+    ("The Thermal Vault", "gate", 111, 1, 7, 9, 9),
+    ("The Root Chamber", "boss", 122, 1, 7, 9, 10),
 )
 
 # How many rooms the floor has is *not* a constant here: it is derived from
@@ -176,17 +174,8 @@ FLOOR_ROOMS = (
 # server rather than a missing number. Deriving it means the two can never
 # disagree, so do not reintroduce a literal: use len(config.FLOOR_ROOMS).
 
-# Corridors, as room-index pairs. L-shaped and carved through room walls, so
-# connectivity is guaranteed by construction and asserted in tests/test_floor.py.
-FLOOR_LINKS = (
-    (0, 1), (0, 2), (0, 3),           # the entry stair fans out three ways
-    (1, 3), (1, 4), (2, 3), (2, 5),   # the north and south wings rejoin
-    (3, 4), (3, 5),
-    (3, 6), (3, 7),                   # through the server farm
-    (6, 8), (6, 9), (7, 9), (7, 10),  # chapel side and cores side
-    (9, 10), (8, 10),
-    (9, 11), (10, 11),                # two ways into the boss arena
-)
+# A room unlocks only after the enemy immediately before it is defeated.
+FLOOR_LINKS = tuple((index, index + 1) for index in range(len(FLOOR_ROOMS) - 1))
 
 # --- Boss HP ceiling -------------------------------------------------------
 # The ceiling on the boss's HP, applied to the depth curve in

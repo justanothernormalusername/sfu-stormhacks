@@ -18,7 +18,7 @@ This is the current design. It supersedes the v1 concept in §1 and the v1 featu
 
 ### 0.1 The core change
 
-v1 made tasks a **gate**: every task was a room with a locked door that opened when the task was done. v2 replaces this with tasks as **preparation**. The dungeon is open-world and every enemy is visible from the start. Enemies are tuned to be hard enough that the player cannot get through tough spots without preparing.
+v1 made tasks a **gate**: every task was a room with a locked door that opened when the task was done. v2 replaces this with tasks as **preparation**. The dungeon is a straight sequence: defeating a room's enemy opens the door to the next room. Enemies are tuned to be hard enough that the player cannot get through tough spots without preparing.
 
 Completing real-life tasks — now called **quests** — earns **items, mainly potions**, which go into the player's inventory and are carried into the next battle. The owner's own example: *sleep early → +5 health potions in your inventory before the boss fight.* The loop is **prepare in real life, then fight**.
 
@@ -28,7 +28,7 @@ Completing real-life tasks — now called **quests** — earns **items, mainly p
 
 | v1 feature | Verdict | Notes |
 |---|---|---|
-| **Locked rooms / unlock rule** | **DECIDED: remove as a gate** | Rooms are no longer locked. All enemies visible and enterable from the start. |
+| **Locked rooms / unlock rule** | **DECIDED: combat progression** | Tasks do not unlock rooms. Defeating an enemy opens the next room in the line. |
 | `completion_in_period` | **DECIDED: keep, repurpose** | Now the basis for period earnings, not door state. |
 | **XP system** (10/50/200 XP, level formula, `RoomClear.xp`, HUD bars) | **DECIDED: drop for now** | Owner sees no point in XP currently. May return later. Player attack formerly depended on level, so combat stat sourcing needs a new answer (§0.7 Q7). |
 | **Leaderboard** (weekly XP) | **DECIDED: change** | Should track **progress through the level** rather than XP. Definition undecided (§0.7 Q1). |
@@ -108,7 +108,7 @@ Never explicitly ratified by the owner.
 1. Ask the blocking questions in §0.7.
 2. **Plan before editing** — list what to remove (gating, XP) versus repurpose (`completion_in_period`).
 3. Centralize tunables into one config (§0.6) so teammates can start balancing.
-4. Remove the lock gate and make all enemies visible and enterable. **Update the Quest Board and dungeon scene text**, which referenced doors and unlocking.
+4. Remove task-based gates. Rooms unlock in sequence when the previous enemy is defeated.
 5. Add potion earning and use as derived records, with deterministic quantities by task kind and a non-AI default category.
 6. Wire potions into the Battle scene — heal and damage boost first, then haste and shield.
 7. Implement the weekly window in local time.
@@ -119,7 +119,7 @@ Never explicitly ratified by the owner.
 
 ### 0.9 Settled versus not — quick reference
 
-**Settled:** tasks are preparation instead of gates; open-world visible enemies; potions as the main reward; items don't expire; XP dropped for now; health bonus dropped; loss has a setback; the log is kept; combat stays turn-based; the leaderboard moves to progress; core pillars preserved; code should be balance-ready.
+**Settled:** tasks are preparation instead of gates; enemies open the next room when defeated; potions are the main reward; items don't expire; XP dropped for now; health bonus dropped; loss has a setback; the log is kept; combat stays turn-based; the leaderboard moves to progress; core pillars preserved; code should be balance-ready.
 
 **Leaning:** weekly reset; Jev for category with task-type-themed item families.
 
@@ -255,7 +255,7 @@ All page data comes from the JSON API via two shared helpers: `api()` (fetch wra
 
 Three scenes:
 - **Boot** — fetches rooms and player state, waits for the pixel font to load before starting
-- **Dungeon** — procedurally generated top-down grid map: a horizontal corridor with rooms branching above and below it, two rooms per column. Arcade-physics sprite with WASD/arrow movement and a camera that follows and zooms to fit the world height (centred horizontally when the map is narrower than the viewport). Locked rooms render a distinct barred door plus a darkened monster silhouette; unlocked rooms show the live monster; cleared rooms show a chest. Standing near a door displays contextual hint text. Walking into an unlocked room's monster triggers a battle.
+- **Dungeon** — a straight horizontal chain of rooms separated by short walkways. Arcade-physics movement uses WASD/arrow keys and a following camera. Each uncleared enemy room has a barred exit; winning removes the gate and opens the next room. Cleared rooms show a chest, and walking into the current room's monster starts battle.
 - **Battle** — turn-based, clickable or keyboard (1/2/3/Esc). Actions: Attack (12% crit, 0.8–1.2× damage variance), Power Strike (2.2× damage, 3-turn cooldown), Defend (reduces incoming damage to 30%, heals up to 6), Flee. HP bars, floating damage numbers, hit flash and shake tweens, particle burst on victory, level-up and loot announcements. Death offers a free retry.
 
 **Art is currently placeholder**: simple shapes drawn programmatically into canvas textures at boot (`makeTextures`), so the game runs with zero asset downloads. This is the most visually obvious weakness (see §5).

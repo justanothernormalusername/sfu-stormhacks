@@ -96,11 +96,13 @@ def current_hp() -> int:
     return c.get("/api/player").json()["hp"]
 
 
-for label, route, start_hp in [("shallow and wounded", [1, 2, 3], 40),
-                               ("deep and wounded", [1, 2, 3, 7, 8, 9], 40),
-                               ("deep and healthy", [1, 2, 3, 7, 8, 9], MAX_HP),
-                               ("nearly full", [1, 2, 3, 7, 8, 9], MAX_HP - 10),
-                               ("already full", [1, 2, 3], MAX_HP)]:
+route_to_shrine = [1, 2, 3, 4, 5]
+route_past_shrine = [1, 2, 3, 4, 5, 7, 8, 9]
+for label, route, start_hp in [("shallow and wounded", route_to_shrine, 40),
+                               ("deep and wounded", route_past_shrine, 40),
+                               ("deep and healthy", route_past_shrine, MAX_HP),
+                               ("nearly full", route_past_shrine, MAX_HP - 10),
+                               ("already full", route_to_shrine, MAX_HP)]:
     login(f"heal-{label.replace(' ', '-')}")
     seed_route(route, start_hp)
     before = current_hp()
@@ -113,10 +115,10 @@ for label, route, start_hp in [("shallow and wounded", [1, 2, 3], 40),
           before <= after <= MAX_HP, f"{before} -> {after} (max {MAX_HP})")
 
 login("heal-depth")
-seed_route([1, 2, 3], 40)
+seed_route(route_to_shrine, 40)
 c.post(f"/api/rooms/{SHRINE}/enter")
 check("resting does not advance depth",
-      c.get("/api/player").json()["furthest_room"] == 3,
+      c.get("/api/player").json()["furthest_room"] == 5,
       f"got {c.get('/api/player').json()['furthest_room']}")
 
 print("\n=== 2. Acting on a room never entered is refused, not a 500 ===")
@@ -147,20 +149,20 @@ again = c.post(f"/api/rooms/{room['index']}/enter")
 check("a fled room can be re-entered", again.status_code == 200,
       f"got {again.status_code} {again.text[:140]}")
 
-print("\n=== 5. Two rooms' fights do not collide ===")
-login("tworooms")
+print("\n=== 5. The next room stays locked while its enemy lives ===")
+login("lockeddoor")
 floor = c.get("/api/rooms").json()
 open_rooms = [r for r in floor["rooms"] if not r["safe"] and not r["blocked"]]
-a, b = open_rooms[0], open_rooms[1]
+a = open_rooms[0]
+b = floor["rooms"][a["index"] + 1]
 c.post(f"/api/rooms/{a['index']}/enter")
-c.post(f"/api/rooms/{b['index']}/enter")
-fa = c.post(f"/api/rooms/{a['index']}/act", json={"action": "attack"}).json()["fight"]
-fb = c.post(f"/api/rooms/{b['index']}/act", json={"action": "attack"}).json()["fight"]
-check("room A's fight is independent of room B",
-      fa["room_index"] == a["index"] and fb["room_index"] == b["index"],
-      f"got {fa['room_index']}, {fb['room_index']}")
-check("each fight advances on its own turn counter",
-      fa["turn"] == 2 and fb["turn"] == 2, f"{fa['turn']}, {fb['turn']}")
+locked = c.post(f"/api/rooms/{b['index']}/enter")
+check("the following room cannot be entered before a win", locked.status_code == 403,
+      f"got {locked.status_code}")
+c.post(f"/api/rooms/{a['index']}/act", json={"action": "flee"})
+still_locked = c.post(f"/api/rooms/{b['index']}/enter")
+check("fleeing does not unlock the following room", still_locked.status_code == 403,
+      f"got {still_locked.status_code}")
 
 print("\n=== 6. Weekly reset drops in-progress fights ===")
 from datetime import datetime  # noqa: E402

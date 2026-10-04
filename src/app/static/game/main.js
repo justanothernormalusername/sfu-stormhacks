@@ -7,10 +7,12 @@
 // moves the whole game. The literals below are layout and pixel art only.
 
 const T = 32; // tile size in px
-const ROOM_W = 6; // tiles per room column, including one shared wall
-const ENTRANCE = 4; // hallway tiles before the first room column
-const ROWS = 15;
-const HALL_ROW = 7; // middle row of the 3-tile hallway (rows 6-8)
+const ROOM_W = 7;
+const ROOM_H = 9;
+const ROOM_GAP = 4; // length of each walkway between rooms, in tiles
+const ROOM_MARGIN = 1;
+const ROWS = ROOM_H + 2;
+const DOOR_ROW = ROOM_MARGIN + Math.floor(ROOM_H / 2);
 const FONT = '"Press Start 2P", monospace';
 const TIER_COLOR = { mob: "#7bd389", "mini-boss": "#e5986b", boss: "#b28cf0" };
 const POTION_COLOR = { heal: "#7bd389", damage: "#e56b6f", haste: "#f2c14e", shield: "#4ea8de" };
@@ -77,6 +79,12 @@ function makeTextures(scene) {
     g.fillStyle(0x120d18).fillRect(0, 0, T, T);
     g.lineStyle(3, 0x6b4226).strokeRect(1.5, 1.5, T - 3, T - 3);
   });
+  texture(scene, "gate", T, T, (g) => {
+    g.fillStyle(0x120d18).fillRect(0, 0, T, T);
+    g.fillStyle(0x8b6f9f);
+    for (let x = 4; x < T; x += 8) g.fillRect(x, 0, 3, T);
+    g.fillStyle(0x54466a).fillRect(0, 5, T, 4).fillRect(0, T - 9, T, 4);
+  });
   texture(scene, "hero", 24, 28, (g) => {
     g.fillStyle(0x9aa5b1).fillRect(5, 0, 14, 5); // helmet
     g.fillStyle(0xf1c27d).fillRect(6, 4, 12, 7); // face
@@ -123,7 +131,7 @@ class BootScene extends Phaser.Scene {
   }
 
   init(data) {
-    // Room returns follow victories or shrine use; fleeing returns to the hall.
+    // Room returns follow victories or shrine use; fleeing returns to a walkway.
     this.spawnRoom = data?.spawnRoom;
     this.spawnPoint = data?.spawnPoint;
   }
@@ -157,9 +165,8 @@ class DungeonScene extends Phaser.Scene {
   }
 
   create() {
-    const cols = Math.max(1, Math.ceil(this.rooms.length / 2));
-    const width = ENTRANCE + ROOM_W * cols + 1;
-    const grid = this.buildGrid(width, cols);
+    const width = this.gridWidth();
+    const grid = this.buildGrid();
     this.walls = this.physics.add.staticGroup();
 
     for (let y = 0; y < ROWS; y++) {
@@ -177,7 +184,7 @@ class DungeonScene extends Phaser.Scene {
     this.hero.body.setSize(16, 12).setOffset(4, 16);
     // Resolve return positions before rooms and their overlap triggers are drawn.
     const room = this.spawnRoom !== undefined ? this.roomCenter(this.spawnRoom) : null;
-    const start = room ?? this.spawnPoint ?? { x: 2 * T, y: HALL_ROW * T + T / 2 };
+    const start = room ?? this.spawnPoint ?? this.roomCenter(0);
     this.hero.setPosition(start.x, start.y);
     this.physics.add.collider(this.hero, this.walls);
 
@@ -208,9 +215,18 @@ class DungeonScene extends Phaser.Scene {
     this.busy = false;
   }
 
-  buildGrid(width, cols) {
-    // The layout comes from the server's room list, so every player walks the
-    // same weekly dungeon. Two rooms per column, top and bottom, off one hallway.
+  gridWidth() {
+    return ROOM_MARGIN * 2 + this.rooms.length * ROOM_W
+      + Math.max(0, this.rooms.length - 1) * ROOM_GAP;
+  }
+
+  roomLeft(i) {
+    return ROOM_MARGIN + i * (ROOM_W + ROOM_GAP);
+  }
+
+  buildGrid() {
+    // One horizontal chain of rooms with short connector walkways between them.
+    const width = this.gridWidth();
     const grid = Array.from({ length: ROWS }, () => Array(width).fill(" "));
     const box = (x0, y0, x1, y1, fill) => {
       for (let y = y0; y <= y1; y++) {
@@ -221,14 +237,14 @@ class DungeonScene extends Phaser.Scene {
         }
       }
     };
-    box(0, 5, width - 1, 9, "h"); // hallway
-    for (let c = 0; c < cols; c++) {
-      const x0 = ENTRANCE + ROOM_W * c;
-      for (const top of [true, false]) {
-        const index = 2 * c + (top ? 0 : 1);
-        if (index >= this.rooms.length) continue;
-        if (top) box(x0, 0, x0 + ROOM_W, 5, "f");
-        else box(x0, 9, x0 + ROOM_W, ROWS - 1, "f");
+    for (let i = 0; i < this.rooms.length; i++) {
+      const left = this.roomLeft(i);
+      box(left, ROOM_MARGIN, left + ROOM_W - 1, ROOM_MARGIN + ROOM_H - 1, "f");
+      if (i < this.rooms.length - 1) {
+        const nextLeft = this.roomLeft(i + 1);
+        for (let y = DOOR_ROW - 1; y <= DOOR_ROW + 1; y++) {
+          for (let x = left + ROOM_W - 1; x <= nextLeft; x++) grid[y][x] = "h";
+        }
       }
     }
     return grid;
@@ -237,35 +253,53 @@ class DungeonScene extends Phaser.Scene {
   // Where room `i` sits on the map. Pure geometry, so it is available before
   // anything is drawn and is the single source of truth for spawn points.
   roomCenter(i) {
-    const top = i % 2 === 0;
     return {
-      x: (ENTRANCE + ROOM_W * Math.floor(i / 2) + 3) * T + T / 2,
-      y: (top ? 3 : 12) * T + 8,
+      x: (this.roomLeft(i) + Math.floor(ROOM_W / 2)) * T + T / 2,
+      y: DOOR_ROW * T + T / 2,
     };
   }
 
+  walkwayPoint(i) {
+    if (i <= 0) return this.roomCenter(0);
+    const previousRight = this.roomLeft(i - 1) + ROOM_W - 1;
+    return {
+      x: (previousRight + Math.ceil(ROOM_GAP / 2)) * T + T / 2,
+      y: DOOR_ROW * T + T / 2,
+    };
+  }
+
+  exitLocked(room, i) {
+    return i < this.rooms.length - 1 && !room.safe && !room.cleared;
+  }
+
   buildRoom(room, i) {
-    const col = Math.floor(i / 2);
-    const top = i % 2 === 0;
-    const centerX = (ENTRANCE + ROOM_W * col + 3) * T + T / 2;
-    const centerY = (top ? 3 : 12) * T;
-    const enemyY = centerY + 8;
+    const left = this.roomLeft(i);
+    const centerX = (left + Math.floor(ROOM_W / 2)) * T + T / 2;
+    const centerY = DOOR_ROW * T + T / 2;
+    const enemyY = centerY;
     room.center = { x: centerX, y: enemyY };
 
-    // Open archway tile on the hallway wall — decorative only. There is no
-    // collider here and none is wanted: every room is enterable from the start.
-    const doorX = (ENTRANCE + ROOM_W * col + 3) * T + T / 2;
-    const doorY = (top ? 5 : 9) * T + T / 2;
-    this.walls.getChildren()
-      .filter((w) => w.x === doorX && w.y === doorY)
-      .forEach((w) => w.destroy());
-    this.add.image(doorX, doorY, "archway");
+    // Archways frame each short connector; uncleared combat exits add a gate.
+    if (i > 0) this.add.image(left * T + T / 2, centerY, "archway");
+    if (i < this.rooms.length - 1) {
+      const exitX = (left + ROOM_W - 1) * T + T / 2;
+      this.add.image(exitX, centerY, "archway");
+      // A real collider keeps the next walkway locked until this enemy dies.
+      if (this.exitLocked(room, i)) {
+        for (let y = DOOR_ROW - 1; y <= DOOR_ROW + 1; y++) {
+          this.walls.create(exitX, y * T + T / 2, "gate").setDepth(5);
+        }
+        this.add.text(exitX - 5, centerY - 44, "LOCKED", {
+          fontFamily: FONT, fontSize: "7px", color: "#e56b6f",
+        }).setOrigin(1, 0.5);
+      }
+    }
 
     // Three things can be in a room, and the branch order matters: a safe room
     // has no `enemy` at all (so touching room.enemy.tier above would crash on
     // the entrance, which is room 0), and a blocked room is one the server has
     // not unlocked yet, so it must not be walkable-into either.
-    const labelY = (top ? 1 : 10) * T + 2;
+    const labelY = (ROOM_MARGIN + 1) * T + 2;
     this.add
       .text(centerX, labelY, room.name, {
         fontFamily: FONT, fontSize: "8px",
@@ -337,7 +371,7 @@ class DungeonScene extends Phaser.Scene {
     this.time.delayedCall(250, () =>
       this.scene.start("battle", {
         room, player: this.stats,
-        retreatPoint: { x: room.center.x, y: HALL_ROW * T + T / 2 },
+        retreatPoint: this.walkwayPoint(room.index),
       }));
   }
 
@@ -667,7 +701,7 @@ class BattleScene extends Phaser.Scene {
     this.settling = true;
     this.refresh();
     this.tweens.add({ targets: this.heroSprite, alpha: 0.3, angle: -90, duration: 500 });
-    this.say("You fall. Your dungeon progress and potions reset.\nYou wake in the entrance hall, fully healed.\nYour quests and task history are kept.\n\nPress SPACE to continue.");
+    this.say("You fall. Your dungeon progress and potions reset.\nYou wake in the entry room, fully healed.\nYour quests and task history are kept.\n\nPress SPACE to continue.");
     this.settling = false;
   }
 
