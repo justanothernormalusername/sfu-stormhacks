@@ -64,11 +64,13 @@ To be designed, not prescribed — but these are the constraints.
 - **API surfaces that change:** `/api/player` (no level/XP), `/api/rooms` (no `unlocked` gating), `/api/rooms/{id}/clear` (the 403 "task not completed" rule disappears), `/api/leaderboard` (progress, not XP). A new endpoint is needed for potion inventory and potion use.
 - **Combat currently resolves client-side.** Server-authoritative combat refereeing is feasible now that combat is turn-based, but it is a larger change and is **UNDECIDED**. At minimum, potion counts and progress must be validated server-side.
 
-### 0.5 AI-assisted reward category (LEANING, with unconfirmed caveats)
+### 0.5 AI-assisted reward category (BUILT)
 
 The owner wants a model called **Jev** to decide reward and category, with items modeled after *task type* so playstyles complement lifestyles — fitness tasks lead to one item family, sleep tasks to another.
 
-*What Jev is, from a web search on 2026-10-04 — verify before relying on it:* a non-generative decision/classifier model from **TypeSafe AI**, launched 2026-09-15. It picks from developer-defined options rather than writing text, via three primitives — **Choice**, **Score**, and **Noul** (a yes/no probability). Because the developer defines the possible outputs, it cannot invent categories, and it returns confidence scores. **Availability is early access via a waitlist — treat it as unavailable unless the owner already has access.**
+*What Jev is — VERIFIED 2026-10-04 by calling it:* a non-generative decision/classifier model, served through Hack Club's proxy at `https://ai.hackclub.com/proxy/v1/jev/systemone`, model id **`jev-latest`** (resolved to `jev-1.13.0` on the call). It is not a chat model and does not write text. You post a `state` plus a set of named `questions`, each with a type — we use **`choice`**, one of its primitives alongside `score` and `noul` (a yes/no probability). Because the developer defines the possible outputs, it cannot invent categories. Answers come back under `answers.<question_name>`, carrying `choice`, `confidence`, and `probabilities` over every option.
+
+**Access confirmed — the waitlist caveat no longer applies.** The earlier version of this section was written from a web search alone and guessed at TypeSafe AI, a 2026-09-15 launch date, and waitlist-only access; none of that was right. There is no public documentation for the endpoint. The response shape above is from an observed response, not from docs.
 
 Advisor recommendations (**PROPOSED**):
 1. **The model picks the category only.** Quantity and potency come from deterministic server code keyed on task kind, so a user cannot create "drink water" worth 50 potions. This preserves server authority.

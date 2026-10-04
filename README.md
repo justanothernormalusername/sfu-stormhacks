@@ -5,7 +5,7 @@ Your to-do list is a dungeon — but in v2 the list no longer *is* the map. Ever
 - **Daily** quest → 1 potion, resets every day
 - **Monthly** quest → 2 potions, resets every month
 - **Goal** → 4 potions, once ever
-- **Potions** → four kinds (Heal, Rage, Haste, Aegis). Which one a quest pays is decided by a small classifier when you add it — keywords as a deterministic fallback, an optional model call to refine the guess. It can only ever narrow the choice to a real potion kind; it never decides quantities.
+- **Potions** → four kinds (Heal, Rage, Haste, Aegis). Which one a quest pays is decided by [Jev](https://ai.hackclub.com/proxy/v1/jev/systemone), a classifier that picks between developer-defined options rather than writing text — so it cannot invent a potion kind. Keywords are the deterministic fallback whenever the model is unset, slow, or down. It can only ever narrow the choice to a real potion kind; it never decides quantities.
 - **Depth** is the score. Furthest room cleared this week, on the leaderboard, next to your party. Health carries between fights; a defeat costs you the potions you drank and sends you back to your last cleared room, fully healed. Nothing else.
 
 Every completion is timestamped by the server in a log your party can see and flag, so nobody can fake their way up.
@@ -34,8 +34,20 @@ FastAPI + SQLModel (SQLite locally, Postgres in production), Jinja pages, and a 
 
 There are no migrations — tables are created on startup. Changing the schema means deleting `dungeon.db`.
 
+### Configuration
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `SECRET_KEY` | **yes in production** | Signs the session cookie. The fallback is regenerated every process start, which logs everyone out on restart. |
+| `DATABASE_URL` | no | Defaults to `sqlite:///./dungeon.db`. |
+| `APP_TZ` | no | Defaults to `America/Vancouver`. Day and week boundaries follow it. |
+| `CLASSIFIER_API_KEY` | no | Enables Jev. Without it, potion categories come from keyword rules alone. |
+
+For local work, put these in a `.env` file at the repo root — it is gitignored, and `config.py` reads it as a fallback for the environment. On Render there is no file, so set them as real environment variables.
+
 ## Deploy (Render + mylost.tech)
 
 1. Push this repo to GitHub, then in Render choose **New → Blueprint** and select the repo. `render.yaml` creates the web service, a Postgres database, and a random `SECRET_KEY`.
 2. In the service's **Settings → Custom Domains**, add `mylost.tech` and create the DNS records Render shows at your domain registrar.
 3. `SECRET_KEY` must be set to a real value. The fallback in `main.py` is regenerated on every process start, which logs everyone out whenever the service restarts.
+4. `CLASSIFIER_API_KEY` should be set too, or the deployed build silently falls back to keyword categories while your local build does not — worth knowing before you demo it.

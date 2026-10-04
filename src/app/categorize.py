@@ -35,42 +35,47 @@ def _from_keywords(text: str) -> str:
 def _from_classifier(title: str, kind: str) -> str | None:
     """Ask the classifier for a category. Returns None on any problem.
 
+    The JEV proxy takes a `state` (the thing being judged) and a set of
+    `questions`; each question is a named schema, and the answer comes back
+    under that name. Ours asks a single choice question whose criteria are the
+    potion flavours, so the model is ranking descriptions rather than inventing
+    a label.
+
     Any missing config, network error, timeout, malformed response, or
     out-of-range answer falls through to the keyword result. A demo must never
-    fail because an API was slow.
+    fail because an API was slow or changed shape.
     """
     key, model = config.CLASSIFIER_API_KEY, config.CLASSIFIER_MODEL
     if not key or not model:
         return None
 
-    options = ", ".join(config.POTION_CATEGORIES)
+    label = config.KIND_LABEL.get(kind, kind)
     body = {
         "model": model,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You classify real-life tasks by which potion reward they "
-                    f"should grant. Reply with exactly one word from: {options}."
+        "state": f"{title} ({label})",
+        "questions": {
+            "potion": {
+                "type": "choice",
+                "instructions": (
+                    "Which potion should this real-life task reward? Judge what "
+                    "doing the task actually is, not how urgent it feels."
                 ),
-            },
-            {"role": "user", "content": f"Task: {title}\nType: {config.KIND_LABEL.get(kind, kind)}"},
-        ],
+                "criteria": config.POTION_CATEGORY_CRITERIA,
+            }
+        },
     }
     request = urllib.request.Request(
-        f"{config.CLASSIFIER_BASE_URL}/chat/completions",
+        config.CLASSIFIER_URL,
         data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=config.CLASSIFIER_TIMEOUT) as response:
             payload = json.loads(response.read())
-        text = payload["choices"][0]["message"]["content"].strip().lower()
+        choice = payload["answers"]["potion"]["choice"]
     except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError):
         return None
 
-    for category in config.POTION_CATEGORIES:
-        if category in text:
-            return category
-    return None
+    # Guard the answer rather than trusting it: only a category the game
+    # actually defines may reach the reward economy.
+    return choice if choice in config.POTION_CATEGORIES else None

@@ -6,6 +6,33 @@ the client. Change a number here and the whole game moves with it.
 """
 
 import os
+from pathlib import Path
+
+# repo root, so a local .env next to README.md is found from src/app/config.py
+DOTENV = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _read_env(name: str, default: str | None = None) -> str | None:
+    """An environment variable, falling back to a local untracked .env file.
+
+    The file is only ever a developer convenience. It is gitignored, and on a
+    deployed host it does not exist — there the real environment variable is
+    the only source, which is what Render sets.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        for line in DOTENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, raw = line.partition("=")
+            if key.strip() == name:
+                return raw.strip().strip("\"'") or default
+    except OSError:
+        pass
+    return default
 
 # --- Periods -------------------------------------------------------------
 # Day, month, and week boundaries all follow the player's local clock.
@@ -94,12 +121,29 @@ DEFEND_HEAL = 6
 DEFEND_REDUCTION = 0.3
 MIN_DAMAGE = 1
 
+# How the classifier weighs each potion. These descriptions do the real work:
+# the model picks between criteria rather than inventing a label, so "recovery,
+# food, sleep" is a much better signal for Heal than the bare word "heal".
+POTION_CATEGORY_CRITERIA = {
+    "heal": "rest, recovery, food, water, sleep, stretching, looking after yourself",
+    "damage": "training, effort, pushing hard, focused deep work, attacking a deadline",
+    "haste": "speed, urgency, clearing a backlog, finishing something quickly",
+    "shield": "protecting yourself, reviewing, planning, saving up, preparing for later",
+}
+
 # --- Classifier (optional) ------------------------------------------------
 # The categorizer falls back to keywords when these are unset or the call
 # fails. Never let this take down task creation.
-CLASSIFIER_API_KEY = os.environ.get("CLASSIFIER_API_KEY")
-CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL")
-CLASSIFIER_BASE_URL = "https://ai.hackclub.com/proxy/v1"
-CLASSIFIER_TIMEOUT = 2.0
+#
+# The key is read from the environment, falling back to a local untracked .env
+# so a teammate can drop a key in a file and go. On Render it is a real
+# environment variable and the file is not there.
+CLASSIFIER_API_KEY = _read_env("CLASSIFIER_API_KEY") or _read_env("KEY")
+CLASSIFIER_MODEL = _read_env("CLASSIFIER_MODEL", "jev-latest")
+CLASSIFIER_URL = "https://ai.hackclub.com/proxy/v1/jev/systemone"
+# Generous, because this runs inline in POST /api/tasks and a reasoning model
+# is slower than a plain completion. Still bounded: the keyword path is
+# instant, and a timeout just means we fall back to it.
+CLASSIFIER_TIMEOUT = 6.0
 
 KIND_LABEL = {"daily": "Daily", "monthly": "Monthly", "goal": "Goal"}
