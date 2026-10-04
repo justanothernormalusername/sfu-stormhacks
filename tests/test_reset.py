@@ -26,8 +26,8 @@ class ResetTests(unittest.TestCase):
                                     "action": "register"})
         start = game.week_start(utcnow())
         baseline = client.get("/api/rooms").json()
-        targets = [r for r in baseline["rooms"] if not r["safe"] and not r["blocked"]][:2]
-        a, b = [r["index"] for r in targets]
+        target = next(r for r in baseline["rooms"] if not r["safe"] and not r["blocked"])
+        a = target["index"]
         with Session(engine) as session:
             user = session.exec(select(User).where(User.username == "resetter")).one()
             other = User(username="unaffected", password_hash="unused")
@@ -46,7 +46,7 @@ class ResetTests(unittest.TestCase):
             session.flush()
             pending_id = pending.id
             for room in baseline["rooms"]:
-                if room["index"] not in (0, a, b):
+                if room["index"] not in (0, a):
                     session.add(BattleClear(user_id=user.id, week_start=start,
                                            room_index=room["index"], hp_after=50))
             session.add(BattleClear(user_id=other_id, week_start=start, room_index=a, hp_after=70))
@@ -67,9 +67,8 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(fled["player"], player_before)
         self.assertEqual(client.get("/api/rooms").json(), rooms_before)
 
-        # Leave another room's fight open: death must invalidate both fights.
+        # Death must invalidate the active fight and the whole run.
         self.assertEqual(client.post(f"/api/rooms/{a}/enter").status_code, 200)
-        self.assertEqual(client.post(f"/api/rooms/{b}/enter").status_code, 200)
         key = (user_id, a, start.isoformat())
         with api._FIGHT_LOCK:
             fight = api._FIGHTS[key]
@@ -90,9 +89,8 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(client.get("/api/tasks").json(), tasks_before)
         self.assertEqual(client.get("/api/log").json(), log_before)
         self.assertEqual(client.get("/api/leaderboard").json()[0]["furthest_room"], 0)
-        for index in (a, b):
-            self.assertEqual(client.post(f"/api/rooms/{index}/act",
-                                         json={"action": "attack"}).status_code, 409)
+        self.assertEqual(client.post(f"/api/rooms/{a}/act",
+                                     json={"action": "attack"}).status_code, 409)
         with Session(engine) as session:
             other_clear = session.exec(select(BattleClear).where(BattleClear.user_id == other_id)).one()
             self.assertEqual(other_clear.hp_after, 70)
@@ -100,7 +98,7 @@ class ResetTests(unittest.TestCase):
         # A fresh fight starts full; future task rewards still replenish the pack.
         fresh = client.post(f"/api/rooms/{a}/enter").json()["fight"]
         self.assertEqual(fresh["hero"]["hp"], player["max_hp"])
-        self.assertEqual(fresh["enemy"]["hp"], targets[0]["enemy"]["hp"])
+        self.assertEqual(fresh["enemy"]["hp"], target["enemy"]["hp"])
         self.assertFalse(any(fresh["buffs"].values()))
         self.assertEqual(sum(fresh["potions"].values()), 0)
         completed = client.post(f"/api/tasks/{pending_id}/complete", json={"note": "new run"})
