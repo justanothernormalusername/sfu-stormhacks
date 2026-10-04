@@ -414,6 +414,10 @@ class BattleScene extends Phaser.Scene {
     this.over = false;
     this.busy = false;
     this.settling = false;
+    // Set while a "drink anyway" warning is on screen: the category the player
+    // is confirming, or null. Declared here so it is always defined rather than
+    // undefined-by-absence, which is what the guard in choose() reads.
+    this.pendingPotion = null;
   }
 
   create() {
@@ -463,6 +467,9 @@ class BattleScene extends Phaser.Scene {
     this.defending = fight.defended;
     this.busy = false;
     this.over = false;
+    // A pending "drink anyway" belongs to the turn that raised it. drawBattle
+    // runs again for the next fight, so it must not carry one over.
+    this.pendingPotion = null;
     // True while a win/lose write is in flight, so SPACE cannot skip ahead of it.
     this.settling = false;
     // Buff timers live in the server's state, not here. `this.buffs` used to be a
@@ -510,21 +517,53 @@ class BattleScene extends Phaser.Scene {
     kb.on("keydown-THREE", () => this.choose("defend"));
     kb.on("keydown-ESC", () => this.choose("flee"));
     kb.on("keydown-SPACE", () => this.choose("continue"));
-    // Potion slots are keys 4..7 and are rebuilt as the inventory changes, so
-    // the handler looks the category up by position rather than capturing one.
+    // Y commits a pending "drink anyway" warning. With nothing pending it does
+    // nothing at all, so it cannot become a shortcut for drinking by accident.
+    kb.on("keydown-Y", () => this.choose("confirm"));
+    // Potion slots are keys 4..7, one per category, and they never move: Heal is
+    // always 4 and Aegis is always 7 whether or not you happen to be holding
+    // them. The slot is looked up by position in the full category list, NOT in
+    // the list of potions currently held — indexing a filtered list meant that
+    // emptying one potion silently slid every other potion down a slot, so
+    // pressing 4 could drink something other than what the label said.
     kb.on("keydown", (event) => {
       const K = Phaser.Input.Keyboard.KeyCodes;
       const index = [K.FOUR, K.FIVE, K.SIX, K.SEVEN].indexOf(event.keyCode);
-      const category = this.heldPotions()[index];
-      if (category) this.choose(`potion:${category}`);
+      const category = CFG.potion_categories[index];
+      // An empty slot is inert. It must not fall through to another potion, and
+      // it must not drink the one in the slot the player did not press.
+      if (category && (this.stats.potions?.[category] || 0) > 0) {
+        this.choose(`potion:${category}`);
+      }
     });
 
     this.say(`A wild ${enemy.name} blocks the way. It hits for about ${enemy.atk}.`);
     this.refresh();
   }
 
+  // What the player is currently carrying, in category order. This is a *view*,
+  // not an index space: nothing may address a potion by its position in this
+  // list, because it changes as the pack empties. Slots come from
+  // CFG.potion_categories instead, which is fixed by the server's config.
   heldPotions() {
     return CFG.potion_categories.filter((c) => (this.stats.potions?.[c] || 0) > 0);
+  }
+
+  // What a potion is actually worth right now, as the player will experience it.
+  //
+  // The server applies `min(effect.heal, max_hp - hp)` and logs the delta it
+  // really applied, not the nominal value — see game.fight_step. Predicting that
+  // here is what lets the button tell the truth *before* the drink: a draught
+  // taken at full health is worth nothing, and one taken near the top is worth
+  // far less than 65, which is exactly what made healing look broken.
+  //
+  // Returns null for the buff potions, which have no up-front number to show.
+  healPreview(category) {
+    const effect = CFG?.potion_effects?.[category];
+    if (!effect || effect.heal == null) return null;
+    const hero = this.fight?.hero;
+    if (!hero) return effect.heal;
+    return Math.max(0, Math.min(effect.heal, hero.max_hp - hero.hp));
   }
 
   makeBar(x, y, name) {
@@ -549,22 +588,37 @@ class BattleScene extends Phaser.Scene {
 
   // Rebuild the potion row from the current inventory. The server is the only
   // thing that decides what is left; this just draws what it last told us.
+  //
+  // Every category gets a slot whether or not it is held, so the row never
+  // reflows: slot 4 is always Heal. A slot with nothing in it is drawn dimmed
+  // and is not clickable, which is the honest representation — the key is
+  // bound, there is simply nothing there to drink.
   renderPotions() {
     if (this.potionRow) this.potionRow.destroy();
     this.potionRow = this.add.container(32, this.scale.height - 112);
-    const held = this.heldPotions();
-    if (!held.length) {
+    if (!this.heldPotions().length) {
       this.potionRow.add(this.add.text(0, 0, "No potions — finish a quest on the Quest Board to restock", {
         fontFamily: FONT, fontSize: "9px", color: "#9d90b3",
       }));
       return;
     }
-    held.forEach((category, i) => {
-      const btn = this.add.text(i * 160, 0, `${i + 4} ${potionShort(category)} ×${this.stats.potions[category]}`, {
+    CFG.potion_categories.forEach((category, i) => {
+      const count = this.stats.potions?.[category] || 0;
+      const preview = this.healPreview(category);
+      // The heal worth showing is the one this drink would actually land, so a
+      // capped draught reads (+5) rather than advertising 65 it cannot give.
+      const worth = preview == null ? "" : ` (+${preview})`;
+      const btn = this.add.text(i * 160, 0, `${i + 4} ${potionShort(category)} ×${count}${worth}`, {
         fontFamily: FONT, fontSize: "9px", color: "#1a1424",
         backgroundColor: POTION_COLOR[category], padding: { x: 8, y: 7 },
-      }).setInteractive({ useHandCursor: true });
-      btn.on("pointerdown", () => this.choose(`potion:${category}`));
+      });
+      if (count > 0) {
+        btn.setInteractive({ useHandCursor: true });
+        btn.on("pointerdown", () => this.choose(`potion:${category}`));
+      } else {
+        // No setInteractive, so there is no hit area to click at all.
+        btn.setAlpha(0.3);
+      }
       this.potionRow.add(btn);
     });
   }
@@ -613,11 +667,42 @@ class BattleScene extends Phaser.Scene {
   // POST /api/rooms/{id}/act, and none of it was computed in this file.
   async choose(action) {
     if (action === "continue") return this.finish();
+    // A pending warning swallows the next key so it cannot be both confirmed
+    // and acted on. Only Y commits. Esc backs out and nothing more — it must
+    // not also flee, which is what the prompt implies. Any other action
+    // cancels and then goes through its normal binding.
+    if (this.pendingPotion) {
+      const pending = this.pendingPotion;
+      this.pendingPotion = null;
+      if (action === "confirm") return this.act("potion", pending);
+      this.say("");
+      this.refresh();
+      if (action === "flee" || action === "cancel" || action === "continue") return;
+      return this.choose(action);
+    }
     // Fleeing is free server-side, but it still goes through the API so the
     // fight is closed out rather than left dangling.
     if (action === "flee") return this.act("flee");
     if (this.busy || this.over) return;
-    if (action.startsWith("potion:")) return this.act("potion", action.slice("potion:".length));
+    if (action.startsWith("potion:")) {
+      const category = action.slice("potion:".length);
+      // Drinking is allowed to be a wasted choice — it costs a turn, and that
+      // is the decision the warning is about. But it should be a *knowing* one:
+      // a heal that will restore less than its full worth is confirmed first,
+      // because the alternative reading is that the potion is simply broken.
+      const preview = this.healPreview(category);
+      const full = CFG?.potion_effects?.[category]?.heal;
+      if (preview != null && full != null && preview < full) {
+        this.pendingPotion = category;
+        this.say(
+          preview === 0
+            ? `You are already at full health. A ${potionShort(category)} would heal nothing and still cost the turn. Drink anyway? (Y / Esc)`
+            : `A ${potionShort(category)} will only restore ${preview} of ${full} HP here, and still costs the turn. Drink anyway? (Y / Esc)`,
+        );
+        return;
+      }
+      return this.act("potion", category);
+    }
     return this.act(action);
   }
 
@@ -654,6 +739,10 @@ class BattleScene extends Phaser.Scene {
     const before = this.fight;
     this.fight = result.fight;
     this.stats = result.player;
+    // The world moved under the warning, so its numbers are stale. Clearing it
+    // here means a pending "drink anyway" can never survive into a new turn and
+    // be confirmed against a fight it was not asked about.
+    this.pendingPotion = null;
 
     const added = this.fight.log.slice((before?.log || []).length);
     this.say(added.join("\n"));

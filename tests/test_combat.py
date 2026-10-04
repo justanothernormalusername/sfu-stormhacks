@@ -18,9 +18,13 @@ os.environ["SECRET_KEY"] = "test-secret"
 os.environ["CLASSIFIER_API_KEY"] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlmodel import Session, select  # noqa: E402
 
-from src.app.db import init_db  # noqa: E402
+from src.app import config, game  # noqa: E402
+from src.app.db import engine, init_db  # noqa: E402
 from src.app.main import app  # noqa: E402
+from src.app.models import Completion, PotionUse, Task, User, utcnow  # noqa: E402
+from src.app.routes import api  # noqa: E402
 from src.app.routes.api import enterable_rooms, walkable_rooms  # noqa: E402
 
 # init_db() is wired to the startup event, which TestClient only fires when used
@@ -163,6 +167,91 @@ r = client.post(f"/api/rooms/{target['index']}/act",
                 json={"action": "potion", "potion": category})
 check("drinking the last one twice is refused", r.status_code in (409, 400),
       f"got {r.status_code}")
+
+print("\n=== 6b. A drink costs exactly one potion and heals exactly what it reports ===")
+# Players reported two bugs: healing "not healing the correct amount", and potions
+# vanishing when two were held. Neither is an accounting bug — this pins the
+# arithmetic that both reports actually turned on, so a future change to the heal
+# value or the derived inventory has to be deliberate.
+#
+# The pack is written directly rather than earned through a quest, because the
+# count under test is the count *after* a drink and the classifier's opinion about
+# how many a quest pays is not what's under test here.
+logout()
+login("quench")
+with Session(engine) as session:
+    user = session.exec(select(User).where(User.username == "quench")).one()
+    # difficulty 0.125 maps to exactly 2 on the current POTION_MIN..MAX range.
+    quest = Task(user_id=user.id, title="sip water", kind="goal",
+                 potion_category="heal", difficulty=0.125)
+    session.add(quest)
+    session.flush()
+    session.add(Completion(user_id=user.id, task_id=quest.id, note="banked"))
+    session.commit()
+    quencher, uid = user.id, user.id
+
+rooms = client.get("/api/rooms").json()["rooms"]
+heal_room = next(r for r in rooms if not r["safe"] and not r["blocked"])
+start = game.week_start(utcnow())
+entered = client.post(f"/api/rooms/{heal_room['index']}/enter").json()
+check("the pack holds exactly two heals to begin with",
+      entered["player"]["potions"].get("heal") == 2,
+      f"got {entered['player']['potions']}")
+
+drunk = client.post(f"/api/rooms/{heal_room['index']}/act",
+                    json={"action": "potion", "potion": "heal"}).json()
+check("drinking one of two leaves exactly one",
+      drunk["player"]["potions"].get("heal") == 1,
+      f"got {drunk['player']['potions']}")
+check("the fight snapshot agrees with the derived count",
+      drunk["fight"]["potions"].get("heal") == 1,
+      f"got {drunk['fight']['potions']}")
+with Session(engine) as session:
+    uses = session.exec(select(PotionUse).where(PotionUse.user_id == uid)).all()
+    check("one drink writes exactly one PotionUse row", len(uses) == 1,
+          f"got {len(uses)}")
+
+# The heal is a flat 65 capped at max HP, and the server logs the delta it
+# actually applied rather than the nominal value. These two cases are the whole
+# reason a player could think healing was broken: at full HP the draught is
+# worth nothing, and near the top it is worth far less than 65.
+full = drunk["fight"]["hero"]["max_hp"]
+with api._FIGHT_LOCK:
+    api._FIGHTS[(uid, heal_room["index"], start.isoformat())]["hero"]["hp"] = full
+wasted = client.post(f"/api/rooms/{heal_room['index']}/act",
+                     json={"action": "potion", "potion": "heal"}).json()
+check("a heal drunk at full HP reports the truth, not the nominal 65",
+      any("+0 HP" in line for line in wasted["fight"]["log"]),
+      f"log={wasted['fight']['log'][-2:]}")
+check("a heal drunk at full HP is still spent",
+      "heal" not in wasted["player"]["potions"],
+      f"got {wasted['player']['potions']}")
+
+logout()
+login("nearly")
+with Session(engine) as session:
+    user = session.exec(select(User).where(User.username == "nearly")).one()
+    quest = Task(user_id=user.id, title="top up", kind="goal",
+                 potion_category="heal", difficulty=1.0)
+    session.add(quest)
+    session.flush()
+    session.add(Completion(user_id=user.id, task_id=quest.id, note="banked"))
+    session.commit()
+    nearly_id = user.id
+
+client.post(f"/api/rooms/{heal_room['index']}/enter")
+with api._FIGHT_LOCK:
+    api._FIGHTS[(nearly_id, heal_room["index"], start.isoformat())]["hero"]["hp"] = 120
+near = client.post(f"/api/rooms/{heal_room['index']}/act",
+                   json={"action": "potion", "potion": "heal"}).json()
+# min(65, 125 - 120) = 5. The player is told 5, not 65 — the number the client
+# shows before the drink has to be this one, or the potion looks broken.
+check("a heal near the top reports the capped amount it will actually give",
+      any("+5 HP" in line for line in near["fight"]["log"]),
+      f"log={near['fight']['log'][-2:]}")
+check("the cap matches min(effect, max_hp - hp)",
+      5 == min(config.POTION_EFFECTS["heal"]["heal"],
+               near["fight"]["hero"]["max_hp"] - 120))
 
 print("\n=== 7. Cooldowns and bogus actions are refused ===")
 # Establish a cooldown first: POWER_COOLDOWN turns follow a power strike, so
