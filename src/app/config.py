@@ -80,9 +80,17 @@ PLAYER_BASE = {
 }
 
 # --- Potions -------------------------------------------------------------
-# Quantity earned per completion, keyed by task kind. The weekly reset is the
-# cap: a daily can pay out at most seven times a week.
-POTIONS_BY_KIND = {"daily": 1, "monthly": 2, "goal": 4}
+# How many potions one completion can pay, and the bounds of that range. The
+# player never chooses a number: the classifier scores how much effort the task
+# actually is, and the score is mapped onto MIN..MAX here. Change these two and
+# every existing quest re-scales, because quests store the score, not the count.
+POTION_MIN = 1
+POTION_MAX = 4
+
+# If the classifier cannot be reached, quests fall back to the bottom of the
+# range. Failing closed matters: paying out the maximum on an API outage would
+# mean anyone could improve their week by breaking the network.
+POTION_FALLBACK = POTION_MIN
 
 POTION_CATEGORIES = ("heal", "damage", "haste", "shield")
 
@@ -111,16 +119,6 @@ POTION_CATEGORY_KEYWORDS = {
                "budget", "insurance", "backup", "safety"],
 }
 
-# --- Combat --------------------------------------------------------------
-DAMAGE_VARIANCE = (0.8, 1.2)
-CRIT_CHANCE = 0.12
-CRIT_MULT = 1.5
-POWER_MULT = 2.2
-POWER_COOLDOWN = 3
-DEFEND_HEAL = 6
-DEFEND_REDUCTION = 0.3
-MIN_DAMAGE = 1
-
 # How the classifier weighs each potion. These descriptions do the real work:
 # the model picks between criteria rather than inventing a label, so "recovery,
 # food, sleep" is a much better signal for Heal than the bare word "heal".
@@ -130,6 +128,40 @@ POTION_CATEGORY_CRITERIA = {
     "haste": "speed, urgency, clearing a backlog, finishing something quickly",
     "shield": "protecting yourself, reviewing, planning, saving up, preparing for later",
 }
+
+# The classifier picks the repeat window too, so the player never chooses one.
+# Each option describes how often someone would genuinely do this, which is the
+# judgement we want rather than "whatever the user felt like clicking".
+KIND_CRITERIA = {
+    "daily": "a daily habit, done most days",
+    "monthly": "a recurring chore, done roughly once a month",
+    "goal": "a one-off achievement, done once and finished",
+}
+
+# The effort scale handed to the classifier as an ordered list. It answers with
+# a continuous score across these indices, which is normalized to 0..1 and then
+# mapped onto POTION_MIN..POTION_MAX. Ordered least effort to most.
+EFFORT_SCALE = [
+    "takes seconds",
+    "a few minutes",
+    "a real chunk of an evening",
+    "most of a day",
+    "a multi-day effort",
+]
+
+# Fallbacks for each field the classifier fills in, applied independently when
+# it cannot be reached. See POTION_FALLBACK for why the effort one fails low.
+DEFAULT_KIND = "daily"
+
+# --- Combat --------------------------------------------------------------
+DAMAGE_VARIANCE = (0.8, 1.2)
+CRIT_CHANCE = 0.12
+CRIT_MULT = 1.5
+POWER_MULT = 2.2
+POWER_COOLDOWN = 3
+DEFEND_HEAL = 6
+DEFEND_REDUCTION = 0.3
+MIN_DAMAGE = 1
 
 # --- Classifier (optional) ------------------------------------------------
 # The categorizer falls back to keywords when these are unset or the call

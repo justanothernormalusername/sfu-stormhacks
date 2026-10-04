@@ -1,11 +1,15 @@
 # Task Dungeon (SFU StormHacks)
 
-Your to-do list is a dungeon — but in v2 the list no longer *is* the map. Every player gets the same twelve-room dungeon, generated fresh each Monday and identical for everyone. There are no locked doors and nothing to unlock. Your real-life quests are preparation: finish one and it pays potions into a pack you carry into the next fight. The dungeon is beatable with potions you earned outside the app, or on nerve alone.
+Play Here: https://mylost.tech/play
 
-- **Daily** quest → 1 potion, resets every day
-- **Monthly** quest → 2 potions, resets every month
-- **Goal** → 4 potions, once ever
-- **Potions** → four kinds (Heal, Rage, Haste, Aegis). Which one a quest pays is decided by [Jev](https://ai.hackclub.com/proxy/v1/jev/systemone), a classifier that picks between developer-defined options rather than writing text — so it cannot invent a potion kind. Keywords are the deterministic fallback whenever the model is unset, slow, or down. It can only ever narrow the choice to a real potion kind; it never decides quantities.
+Your to-do list is a dungeon — but in v2 the list no longer _is_ the map. Every player gets the same twelve-room dungeon, generated fresh each Monday and identical for everyone. There are no locked doors and nothing to unlock. Your real-life quests are preparation: finish one and it pays potions into a pack you carry into the next fight. The dungeon is beatable with potions you earned outside the app, or on nerve alone.
+
+- **You type a quest title. That's the whole form.** No dropdown, no reward picker. [Jev](https://ai.hackclub.com/proxy/v1/jev/systemone) reads the title in one call and answers three questions at once:
+  - **Which potion** — Heal, Rage, Haste, or Aegis
+  - **How often you'd genuinely repeat it** — daily, monthly, or a one-off goal
+  - **How much effort it is** — a continuous score on a five-rung scale
+- **The count is never asked for.** The effort score is mapped onto a bounded range in `config.py` (`POTION_MIN`–`POTION_MAX`, currently 1–4). So no quest title, however worded, can buy a reward outside that range — writing "the hardest task imaginable" gets you the same ceiling as genuinely doing it. Retune those two numbers and every existing quest re-scales, because quests store the score rather than the count.
+- **If Jev is unreachable**, the keyword rules pick the potion, the quest repeats daily, and it pays the floor. Failing low is deliberate: an outage must never be worth exploiting.
 - **Depth** is the score. Furthest room cleared this week, on the leaderboard, next to your party. Health carries between fights; a defeat costs you the potions you drank and sends you back to your last cleared room, fully healed. Nothing else.
 
 Every completion is timestamped by the server in a log your party can see and flag, so nobody can fake their way up.
@@ -15,6 +19,8 @@ Every completion is timestamped by the server in a log your party can see and fl
 There is no XP column, no level column, no potion-count column, and no "HP" field on the user. Depth is the furthest `BattleClear` row; your pack is completions minus potion-uses; your HP is the `hp_after` on your furthest cleared room. Every one of those is a sum or a max over append-only rows.
 
 This is not just tidiness. It means the client cannot cheat by editing a number it was handed — the server recomputes from rows and simply disagrees. It is the strongest technical claim in the project, and it is enforced by the database rather than by application checks.
+
+The one judgement the server _does_ cache is the classifier's verdict on a quest — potion, repeat window, and effort score, all frozen when the quest is created so gameplay never waits on a network call. What it deliberately does not cache is the reward: the potion _count_ is recomputed from the score every time, which is why the bounds in `config.py` are the only thing that decides what a quest is worth.
 
 ## Run locally
 
@@ -36,12 +42,12 @@ There are no migrations — tables are created on startup. Changing the schema m
 
 ### Configuration
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `SECRET_KEY` | **yes in production** | Signs the session cookie. The fallback is regenerated every process start, which logs everyone out on restart. |
-| `DATABASE_URL` | no | Defaults to `sqlite:///./dungeon.db`. |
-| `APP_TZ` | no | Defaults to `America/Vancouver`. Day and week boundaries follow it. |
-| `CLASSIFIER_API_KEY` | no | Enables Jev. Without it, potion categories come from keyword rules alone. |
+| Variable             | Required              | Purpose                                                                                                        |
+| -------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `SECRET_KEY`         | **yes in production** | Signs the session cookie. The fallback is regenerated every process start, which logs everyone out on restart. |
+| `DATABASE_URL`       | no                    | Defaults to `sqlite:///./dungeon.db`.                                                                          |
+| `APP_TZ`             | no                    | Defaults to `America/Vancouver`. Day and week boundaries follow it.                                            |
+| `CLASSIFIER_API_KEY` | no                    | Enables Jev. Without it, quests pay the minimum via keyword rules alone.                                       |
 
 For local work, put these in a `.env` file at the repo root — it is gitignored, and `config.py` reads it as a fallback for the environment. On Render there is no file, so set them as real environment variables.
 

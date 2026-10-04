@@ -12,7 +12,6 @@ router = APIRouter(prefix="/api")
 
 class TaskIn(BaseModel):
     title: str
-    kind: str
 
 
 class CompleteIn(BaseModel):
@@ -94,6 +93,21 @@ def potion_inventory(session: Session, user: User, start) -> dict[str, int]:
     return game.inventory(completions, tasks, uses, start)
 
 
+def _task_view(task: Task) -> dict:
+    """What the quest board shows for one quest.
+
+    The reward is computed from the cached effort score rather than stored, so
+    this always reflects the current POTION_MIN/POTION_MAX.
+    """
+    return {
+        "id": task.id,
+        "title": task.title,
+        "kind": task.kind,
+        "potion": task.potion_category or config.DEFAULT_CATEGORY,
+        "potions": game.potions_for(task),
+    }
+
+
 def player_stats(session: Session, user: User) -> dict:
     start = game.week_start(utcnow())
     inventory = potion_inventory(session, user, start)
@@ -123,7 +137,8 @@ def get_config(user: User = Depends(current_user)):
     return {
         "player": config.PLAYER_BASE,
         "room_count": config.ROOM_COUNT,
-        "potions_by_kind": config.POTIONS_BY_KIND,
+        "potion_min": config.POTION_MIN,
+        "potion_max": config.POTION_MAX,
         "potion_effects": config.POTION_EFFECTS,
         "potion_categories": list(config.POTION_CATEGORIES),
         "kind_labels": config.KIND_LABEL,
@@ -155,8 +170,8 @@ def get_rooms(user: User = Depends(current_user), session: Session = Depends(get
 @router.get("/tasks")
 def list_tasks(user: User = Depends(current_user), session: Session = Depends(get_session)):
     """Active quests with what each one is worth and whether it is already
-    banked for its period. The potion category is read off the cached
-    categorization, so this endpoint never calls the classifier."""
+    banked for its repeat window. Everything shown is read off the row cached at
+    creation time, so this endpoint never calls the classifier."""
     now = utcnow()
     tasks = session.exec(select(Task).where(Task.user_id == user.id, Task.active == True)).all()  # noqa: E712
     completions = session.exec(select(Completion).where(Completion.user_id == user.id)).all()
@@ -164,14 +179,8 @@ def list_tasks(user: User = Depends(current_user), session: Session = Depends(ge
     for completion in completions:
         by_task.setdefault(completion.task_id, []).append(completion)
     return [
-        {
-            "id": t.id,
-            "title": t.title,
-            "kind": t.kind,
-            "potion": t.potion_category or config.DEFAULT_CATEGORY,
-            "potions": config.POTIONS_BY_KIND.get(t.kind, 0),
-            "done": game.completion_in_period(t, by_task.get(t.id, []), now) is not None,
-        }
+        {**_task_view(t),
+         "done": game.completion_in_period(t, by_task.get(t.id, []), now) is not None}
         for t in tasks
     ]
 
@@ -179,16 +188,18 @@ def list_tasks(user: User = Depends(current_user), session: Session = Depends(ge
 @router.post("/tasks")
 def create_task(body: TaskIn, user: User = Depends(current_user), session: Session = Depends(get_session)):
     title = body.title.strip()
-    if body.kind not in game.KINDS or not title:
-        raise HTTPException(400, "Task needs a title and kind daily/monthly/goal")
+    if not title:
+        raise HTTPException(400, "Task needs a title")
     title = title[:120]
-    # Categorized once here, never in the gameplay path.
-    task = Task(user_id=user.id, title=title, kind=body.kind,
-                potion_category=categorize.category_for(title, body.kind))
+    # Judged once here, never in the gameplay path. The player chooses neither
+    # the potion nor the count — both come back from the classifier.
+    verdict = categorize.classify(title)
+    task = Task(user_id=user.id, title=title, kind=verdict["kind"],
+                potion_category=verdict["category"], difficulty=verdict["difficulty"])
     session.add(task)
     session.commit()
     session.refresh(task)
-    return task
+    return _task_view(task)
 
 
 @router.delete("/tasks/{task_id}")
@@ -216,7 +227,7 @@ def complete_task(task_id: int, body: CompleteIn, user: User = Depends(current_u
     category = task.potion_category or config.DEFAULT_CATEGORY
     return {
         "completion": completion,
-        "potions_earned": game.potions_earned_for(completion, task),
+        "potions_earned": game.potions_for(task),
         "category": category,
         "potions": potion_inventory(session, user, game.week_start(now)),
     }

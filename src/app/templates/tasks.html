@@ -8,11 +8,6 @@
   next fight. No quest opens a door — all of them are open from the start.</p>
   <form id="new-task" class="row">
     <input name="title" placeholder="e.g. Go for a 20 min run" required maxlength="120">
-    <select name="kind">
-      <option value="daily">Daily · 1 potion</option>
-      <option value="monthly">Monthly · 2 potions</option>
-      <option value="goal">Goal · 4 potions</option>
-    </select>
     <button>Add quest</button>
   </form>
   <p id="msg" class="muted"></p>
@@ -68,9 +63,19 @@ async function render() {
 document.getElementById("new-task").onsubmit = async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
-  await api("/api/tasks", { method: "POST", body: { title: form.get("title"), kind: form.get("kind") } });
-  e.target.reset();
-  document.getElementById("msg").textContent = "Quest added. Finish it to stock potions.";
+  const btn = e.target.querySelector("button");
+  btn.disabled = true;
+  btn.textContent = "Reading it…";
+  try {
+    const task = await api("/api/tasks", { method: "POST", body: { title: form.get("title") } });
+    e.target.reset();
+    const potion = POTION_LABEL[task.potion] ?? task.potion;
+    document.getElementById("msg").textContent =
+      `Added. It reads as ${KIND_LABEL[task.kind].toLowerCase()} and pays ${task.potions} ${potion} potion${task.potions === 1 ? "" : "s"}.`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Add quest";
+  }
   render();
 };
 render();

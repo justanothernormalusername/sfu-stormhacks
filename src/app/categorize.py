@@ -1,13 +1,26 @@
-"""Decide which potion a task rewards.
+"""Decide what a task rewards: which potion, how many, and how often it repeats.
 
-The keyword rules below are the shipping path: deterministic, offline, and
-instant. The optional classifier refines that guess, but it can only ever
-narrow the result to one of POTION_CATEGORIES — it cannot invent a category,
-and it cannot change how *many* potions are awarded. That keeps the reward
-economy server-authoritative no matter what the model returns.
+Everything here is a *judgement about the task*, made once when the task is
+created and cached on its row, so nothing in the gameplay request path ever
+waits on a network call.
 
-Call this once, when a task is created. The answer is cached on the task row,
-so nothing in the gameplay request path ever waits on a network call.
+Three questions go out in a single request, because the proxy takes a set of
+named questions per call:
+
+- **choice** — which potion flavour fits
+- **choice** — how often someone would genuinely repeat this
+- **score**  — how much effort it is, on an ordered scale
+
+The model can only pick from criteria this file supplies, so it cannot invent a
+potion kind or a repeat window. The potion *count* is not asked for at all: the
+score is mapped onto a bounded range here, in config, which means the player
+cannot write a task title that talks the model into a bigger reward, and a
+teammate can retune the whole economy by changing two numbers.
+
+Every failure path returns a usable answer. A missing key, a timeout, a
+malformed response, or a value the game does not define falls back field by
+field — the keyword rules for the category, a daily for the repeat window, and
+the bottom of the range for the reward.
 """
 
 import json
@@ -17,11 +30,39 @@ import urllib.request
 from . import config
 
 
-def category_for(title: str, kind: str) -> str:
-    """Best-guess potion category for a task. Never raises."""
-    fallback = _from_keywords(f"{title} {kind}")
-    refined = _from_classifier(title, kind)
-    return refined if refined in config.POTION_CATEGORIES else fallback
+def classify(title: str) -> dict:
+    """Judge a task. Never raises, always returns every field.
+
+    `difficulty` is normalized to 0..1 regardless of how the model expressed it,
+    so a change to the length of EFFORT_SCALE does not silently rescale rewards.
+    """
+    answers = _from_classifier(title)
+    return {
+        "category": _valid(answers.get("potion"), config.POTION_CATEGORIES)
+        or _from_keywords(f"{title} {config.DEFAULT_KIND}"),
+        "kind": _valid(answers.get("kind"), config.KIND_CRITERIA)
+        or config.DEFAULT_KIND,
+        "difficulty": _normalized(answers.get("effort")),
+    }
+
+
+def potions_for(difficulty: float | None) -> int:
+    """How many potions a completion of this task pays.
+
+    Derived from the cached score rather than stored, so POTION_MIN/POTION_MAX
+    remain the single source of truth for the economy. A task with no score —
+    created while the classifier was unreachable — pays the fallback.
+    """
+    if difficulty is None:
+        return config.POTION_FALLBACK
+    span = config.POTION_MAX - config.POTION_MIN
+    return max(config.POTION_MIN, min(config.POTION_MAX,
+                                      round(config.POTION_MIN + difficulty * span)))
+
+
+def _valid(value: str | None, allowed) -> str | None:
+    """Trust the answer only as far as the game defines it."""
+    return value if value in allowed else None
 
 
 def _from_keywords(text: str) -> str:
@@ -32,27 +73,33 @@ def _from_keywords(text: str) -> str:
     return config.DEFAULT_CATEGORY
 
 
-def _from_classifier(title: str, kind: str) -> str | None:
-    """Ask the classifier for a category. Returns None on any problem.
+def _normalized(answer) -> float | None:
+    """Pull 0..1 out of a score answer, whatever shape it arrived in.
 
-    The JEV proxy takes a `state` (the thing being judged) and a set of
-    `questions`; each question is a named schema, and the answer comes back
-    under that name. Ours asks a single choice question whose criteria are the
-    potion flavours, so the model is ranking descriptions rather than inventing
-    a label.
+    The model interpolates across EFFORT_SCALE, so the raw score runs from 0 to
+    len(scale) - 1. Dividing by that span is what makes the stored value
+    independent of how many rungs the scale has.
+    """
+    raw = answer.get("score") if isinstance(answer, dict) else None
+    if not isinstance(raw, (int, float)):
+        return None
+    span = max(1, len(config.EFFORT_SCALE) - 1)
+    return max(0.0, min(1.0, raw / span))
 
-    Any missing config, network error, timeout, malformed response, or
-    out-of-range answer falls through to the keyword result. A demo must never
-    fail because an API was slow or changed shape.
+
+def _from_classifier(title: str) -> dict:
+    """One request, three questions. Returns {} on any problem.
+
+    A demo must never fail because an API was slow, unreachable, or changed
+    shape — so every exception here is swallowed and the caller falls back.
     """
     key, model = config.CLASSIFIER_API_KEY, config.CLASSIFIER_MODEL
     if not key or not model:
-        return None
+        return {}
 
-    label = config.KIND_LABEL.get(kind, kind)
     body = {
         "model": model,
-        "state": f"{title} ({label})",
+        "state": title,
         "questions": {
             "potion": {
                 "type": "choice",
@@ -61,7 +108,23 @@ def _from_classifier(title: str, kind: str) -> str | None:
                     "doing the task actually is, not how urgent it feels."
                 ),
                 "criteria": config.POTION_CATEGORY_CRITERIA,
-            }
+            },
+            "kind": {
+                "type": "choice",
+                "instructions": (
+                    "How often would someone genuinely repeat this, without being "
+                    "asked? Pick the window they would actually keep up."
+                ),
+                "criteria": config.KIND_CRITERIA,
+            },
+            "effort": {
+                "type": "score",
+                "instructions": (
+                    "How much real effort does doing this take, on a normal day "
+                    "when nobody is motivating the person?"
+                ),
+                "criteria": config.EFFORT_SCALE,
+            },
         },
     }
     request = urllib.request.Request(
@@ -72,10 +135,12 @@ def _from_classifier(title: str, kind: str) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=config.CLASSIFIER_TIMEOUT) as response:
             payload = json.loads(response.read())
-        choice = payload["answers"]["potion"]["choice"]
+        answers = payload["answers"]
     except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError):
-        return None
+        return {}
 
-    # Guard the answer rather than trusting it: only a category the game
-    # actually defines may reach the reward economy.
-    return choice if choice in config.POTION_CATEGORIES else None
+    return {
+        "potion": answers.get("potion", {}).get("choice"),
+        "kind": answers.get("kind", {}).get("choice"),
+        "effort": answers.get("effort", {}),
+    }
