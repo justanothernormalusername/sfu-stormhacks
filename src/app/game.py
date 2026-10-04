@@ -157,10 +157,9 @@ def _enemies_for_room(seed: random.Random, arch: dict, depth: int,
 def floor_for_week(week_start_dt: datetime) -> dict:
     """The whole dungeon for one week. Identical for every player.
 
-    The *layout* is authored in config.FLOOR_ROOMS — a dungeon is a designed
-    sequence of beats, and a generator that shuffles twelve rooms in a row is not
-    one. What this draws from the week seed is what a player shouldn't expect to
-    be identical twice: creature names, flavour text, and the weekly modifier.
+    The straight-line layout is authored in config.FLOOR_ROOMS. What this draws
+    from the week seed is what a player shouldn't expect to be identical twice:
+    creature names, flavour text, and the weekly modifier.
     So the map is a place you learn, and the week is a surprise.
 
     Returns the map plus every room's contents, so the client renders what the

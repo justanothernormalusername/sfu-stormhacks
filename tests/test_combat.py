@@ -91,9 +91,12 @@ check("rooms behind uncleared doors start blocked", any(r["blocked"] for r in ro
 # requires cleared rooms would seal the entire floor. Check the walkable set
 # actually grows as fights are won.
 before = walkable_rooms(floor, set())
-after = walkable_rooms(floor, {0, 3})
+after = walkable_rooms(floor, {1})
 check("clearing a room opens more of the floor", len(after) > len(before),
       f"{len(before)} -> {len(after)}")
+check("rooms form one sequential chain",
+      {tuple(link) for link in floor["links"]}
+      == {(i, i + 1) for i in range(len(rooms) - 1)})
 check("the floor is completable", len(walkable_rooms(floor, set(range(len(rooms)))))
       == len(rooms))
 check("blocked rooms are exactly the ones entry refuses",

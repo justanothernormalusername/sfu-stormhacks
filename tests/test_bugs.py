@@ -68,6 +68,59 @@ r2 = c.post(f"/api/rooms/{shrine['index']}/enter")
 check("second rest is refused cleanly, not a 500",
       r2.status_code == 409, f"got {r2.status_code} {r2.text[:140]}")
 
+print("\n=== 1b. The shrine heals what it says, and the heal survives walking past it ===")
+# Two ways this was wrong, both invisible from the happy path because a full-HP
+# player heals the right amount by accident:
+#   * it wrote `max_hp` while reporting `restore`, so the HUD claimed "+58" and
+#     the player got a whole bar;
+#   * HP is read from the *furthest* cleared row, so a shrine used after walking
+#     past it recorded a heal nothing ever read back — the run gained nothing
+#     while the client said it had.
+# The invariant that covers both: `restored` must equal the HP actually gained.
+SHRINE = next(r["index"] for r in floor["rooms"] if r["safe"] and r.get("restore"))
+MAX_HP = config.PLAYER_BASE["max_hp"]
+
+
+def seed_route(indices, hp):
+    """Write clear rows directly, so the heal is tested independently of combat."""
+    username = c.get("/api/player").json()["username"]
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.username == username)).one()
+        for index in indices:
+            session.add(BattleClear(user_id=user.id, week_start=game.week_start(utcnow()),
+                                    room_index=index, hp_after=hp))
+        session.commit()
+
+
+def current_hp() -> int:
+    return c.get("/api/player").json()["hp"]
+
+
+route_to_shrine = [1, 2, 3, 4, 5]
+route_past_shrine = [1, 2, 3, 4, 5, 7, 8, 9]
+for label, route, start_hp in [("shallow and wounded", route_to_shrine, 40),
+                               ("deep and wounded", route_past_shrine, 40),
+                               ("deep and healthy", route_past_shrine, MAX_HP),
+                               ("nearly full", route_past_shrine, MAX_HP - 10),
+                               ("already full", route_to_shrine, MAX_HP)]:
+    login(f"heal-{label.replace(' ', '-')}")
+    seed_route(route, start_hp)
+    before = current_hp()
+    rested = c.post(f"/api/rooms/{SHRINE}/enter").json()
+    after = current_hp()
+    check(f"{label}: the reported heal is the heal granted",
+          rested["restored"] == after - before,
+          f"reported {rested['restored']}, granted {after - before}")
+    check(f"{label}: HP never goes down and never overflows",
+          before <= after <= MAX_HP, f"{before} -> {after} (max {MAX_HP})")
+
+login("heal-depth")
+seed_route(route_to_shrine, 40)
+c.post(f"/api/rooms/{SHRINE}/enter")
+check("resting does not advance depth",
+      c.get("/api/player").json()["furthest_room"] == 5,
+      f"got {c.get('/api/player').json()['furthest_room']}")
+
 print("\n=== 2. Acting on a room never entered is refused, not a 500 ===")
 login("ghost")
 r = c.post("/api/rooms/5/act", json={"action": "attack"})
@@ -96,20 +149,20 @@ again = c.post(f"/api/rooms/{room['index']}/enter")
 check("a fled room can be re-entered", again.status_code == 200,
       f"got {again.status_code} {again.text[:140]}")
 
-print("\n=== 5. Two rooms' fights do not collide ===")
-login("tworooms")
+print("\n=== 5. The next room stays locked while its enemy lives ===")
+login("lockeddoor")
 floor = c.get("/api/rooms").json()
 open_rooms = [r for r in floor["rooms"] if not r["safe"] and not r["blocked"]]
-a, b = open_rooms[0], open_rooms[1]
+a = open_rooms[0]
+b = floor["rooms"][a["index"] + 1]
 c.post(f"/api/rooms/{a['index']}/enter")
-c.post(f"/api/rooms/{b['index']}/enter")
-fa = c.post(f"/api/rooms/{a['index']}/act", json={"action": "attack"}).json()["fight"]
-fb = c.post(f"/api/rooms/{b['index']}/act", json={"action": "attack"}).json()["fight"]
-check("room A's fight is independent of room B",
-      fa["room_index"] == a["index"] and fb["room_index"] == b["index"],
-      f"got {fa['room_index']}, {fb['room_index']}")
-check("each fight advances on its own turn counter",
-      fa["turn"] == 2 and fb["turn"] == 2, f"{fa['turn']}, {fb['turn']}")
+locked = c.post(f"/api/rooms/{b['index']}/enter")
+check("the following room cannot be entered before a win", locked.status_code == 403,
+      f"got {locked.status_code}")
+c.post(f"/api/rooms/{a['index']}/act", json={"action": "flee"})
+still_locked = c.post(f"/api/rooms/{b['index']}/enter")
+check("fleeing does not unlock the following room", still_locked.status_code == 403,
+      f"got {still_locked.status_code}")
 
 print("\n=== 6. Weekly reset drops in-progress fights ===")
 from datetime import datetime  # noqa: E402
@@ -160,6 +213,20 @@ if cap is None:
 else:
     check("boss HP never exceeds the ceiling", boss_room["enemy"]["hp"] <= cap,
           f"enemy {boss_room['enemy']['hp']} > cap {cap}")
+
+print("\n=== 9. Archiving a quest does not confiscate its reward ===")
+login("archiver")
+c.post("/api/tasks", json={"title": "archive reward test"})
+task = next(t for t in c.get("/api/tasks").json() if t["title"] == "archive reward test")
+c.post(f"/api/tasks/{task['id']}/complete", json={"note": "done"})
+before = c.get("/api/player").json()["potions_total"]
+c.delete(f"/api/tasks/{task['id']}")
+after = c.get("/api/player").json()["potions_total"]
+check("earned potions survive archiving", before > 0 and after == before,
+      f"before={before}, after={after}")
+again = c.post(f"/api/tasks/{task['id']}/complete", json={"note": "again"})
+check("an archived quest cannot be completed through the API", again.status_code == 409,
+      f"got {again.status_code}")
 
 print("\n" + "=" * 60)
 if failures:

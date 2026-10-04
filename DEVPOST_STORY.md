@@ -30,7 +30,7 @@ We also kept progression tied to records rather than trusting values sent by the
 
 ## Challenges we ran into
 
-Our biggest challenge was changing the core loop. The first version treated each task as a room and completion as the key to its door. As we worked through the idea, that started to feel like a checklist with dungeon art. We redesigned it so the dungeon is open from the start and tasks become preparation instead. That made the two halves of the product work together: real-life effort equips the player, and the game still asks them to make decisions and win the battle.
+Our biggest challenge was changing the core loop. The first version treated each task as a room and completion as the key to its door. As we worked through the idea, that started to feel like a checklist with dungeon art. We redesigned tasks as preparation instead: defeating an enemy opens the next room, while real-life effort supplies the potions needed to survive. That made the two halves of the product work together.
 
 The redesign also forced us to answer tricky state questions. Potion inventory, room progress, checkpoints, and weekly resets all need to agree between the browser and the server. Time boundaries add another wrinkle: a week should reset at local midnight, not at UTC midnight, or players can lose progress at an unexpected hour. We centralized the balance rules and kept the optional classifier out of the gameplay path so a slow or unavailable model cannot block a quest or break a demo.
 

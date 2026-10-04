@@ -10,7 +10,7 @@ Your to-do list is a dungeon — but in v2 the list no longer _is_ the map. Ever
   - **How much effort it is** — a continuous score on a five-rung scale
 - **The count is never asked for.** The effort score is mapped onto a bounded range in `config.py` (`POTION_MIN`–`POTION_MAX`, currently 1–4). So no quest title, however worded, can buy a reward outside that range — writing "the hardest task imaginable" gets you the same ceiling as genuinely doing it. Retune those two numbers and every existing quest re-scales, because quests store the score rather than the count.
 - **If Jev is unreachable**, the keyword rules pick the potion, the quest repeats daily, and it pays the floor. Failing low is deliberate: an outage must never be worth exploiting.
-- **Depth** is the score. Furthest room cleared in your current run, on the leaderboard, next to your party. Health carries between fights. Death resets cleared rooms, shrines, active fights, and all potions, then returns you to the entrance hall fully healed. Quests and their completion history stay intact. Fleeing returns you to the central hallway outside the room and keeps your run progress.
+- **Depth** is the score. Furthest room cleared in your current run, on the leaderboard, next to your party. Health carries between fights. Death resets cleared rooms, shrines, active fights, and all potions, then returns you to the entry room fully healed. Quests and their completion history stay intact. Fleeing returns you to the walkway behind the room and keeps your run progress.
 
 Every completion is timestamped by the server in a log your party can see and flag, so nobody can fake their way up.
 

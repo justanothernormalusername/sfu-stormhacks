@@ -58,6 +58,12 @@ def user_tasks(session: Session, user_id: int) -> dict[int, Task]:
     return {t.id: t for t in rows}
 
 
+def all_tasks_by_id(session: Session, user_id: int) -> dict[int, Task]:
+    """Every task that can back a completion, including archived tasks."""
+    rows = session.exec(select(Task).where(Task.user_id == user_id)).all()
+    return {t.id: t for t in rows}
+
+
 def current_hp(session: Session, user: User, start) -> int:
     """HP carried from the furthest clear; a fresh run starts at full health."""
     last = session.exec(
@@ -83,7 +89,9 @@ def furthest_room_index(session: Session, user: User, start) -> int:
 
 
 def potion_inventory(session: Session, user: User, start) -> dict[str, int]:
-    tasks = user_tasks(session, user.id)
+    # Archiving only hides a quest from the board. Its completed work and reward
+    # remain real, so inventory must resolve completions against archived tasks.
+    tasks = all_tasks_by_id(session, user.id)
     completions = session.exec(
         select(Completion).where(Completion.user_id == user.id, Completion.completed_at >= start)
     ).all()
@@ -289,14 +297,20 @@ def archive_task(task_id: int, user: User = Depends(current_user), session: Sess
 def complete_task(task_id: int, body: CompleteIn, user: User = Depends(current_user),
                   session: Session = Depends(get_session)):
     task = own_task(session, user, task_id)
-    now = utcnow()
-    completions = session.exec(select(Completion).where(Completion.task_id == task.id)).all()
-    if game.completion_in_period(task, completions, now):
-        raise HTTPException(409, "Already completed for this period")
-    completion = Completion(task_id=task.id, user_id=user.id, completed_at=now, note=body.note[:280])
-    session.add(completion)
-    session.commit()
-    session.refresh(completion)
+    if not task.active:
+        raise HTTPException(409, "That quest is archived")
+    # Check and insert under one task lock. Without it, two fast clicks can both
+    # observe no current completion and each mint the full reward.
+    with task_lock(task.id):
+        now = utcnow()
+        completions = session.exec(select(Completion).where(Completion.task_id == task.id)).all()
+        if game.completion_in_period(task, completions, now):
+            raise HTTPException(409, "Already completed for this period")
+        completion = Completion(task_id=task.id, user_id=user.id,
+                                completed_at=now, note=body.note[:280])
+        session.add(completion)
+        session.commit()
+        session.refresh(completion)
     category = task.potion_category or config.DEFAULT_CATEGORY
     return {
         "completion": completion,
@@ -339,12 +353,32 @@ def _enter_room(room_index: int, user: User, session: Session, start) -> dict:
     if room["safe"]:
         restored = 0
         if room.get("restore"):
+            # Heal from the HP the run has actually reached, not from a full bar.
+            # A player who walks past the shrine and doubles back is still carrying
+            # the damage from the deepest fight, and `current_hp` reads exactly
+            # that — so a top-up here has to start from it.
+            before = current_hp(session, user, start)
+            after = min(config.PLAYER_BASE["max_hp"], before + room["restore"])
+            # Report what was actually healed. The remaining headroom can be less
+            # than `restore`, and the client prints this number, so reporting the
+            # nominal value would describe a heal the player did not receive.
+            restored = after - before
             # A clear records shrine use until death or the weekly reset.
             session.add(BattleClear(user_id=user.id, week_start=start,
-                                    room_index=room_index,
-                                    hp_after=config.PLAYER_BASE["max_hp"]))
+                                    room_index=room_index, hp_after=after))
+            # HP lives on the furthest cleared row, so a shrine behind the frontier
+            # would record a heal that nothing ever reads back. Carry the healed
+            # value forward onto that row when the shrine is not itself the latest.
+            last = session.exec(
+                select(BattleClear).where(
+                    BattleClear.user_id == user.id, BattleClear.week_start == start,
+                    BattleClear.room_index > room_index,
+                ).order_by(BattleClear.room_index.desc())
+            ).first()
+            if last is not None:
+                last.hp_after = max(last.hp_after, after)
+                session.add(last)
             session.commit()
-            restored = room["restore"]
         return {"room": room, "safe": True, "restored": restored,
                 "player": player_stats(session, user)}
 
@@ -456,6 +490,17 @@ _FIGHT_LOCK = Lock()
 # One lock per player's week so a death cannot race another room's action or
 # entry and restore progress from the run that just ended.
 _FIGHT_LOCKS: dict[tuple[int, str], Lock] = {}
+_TASK_LOCK = Lock()
+_TASK_LOCKS: dict[int, Lock] = {}
+
+
+@contextmanager
+def task_lock(task_id: int):
+    """Serialize completion eligibility and insertion for one quest."""
+    with _TASK_LOCK:
+        lock = _TASK_LOCKS.setdefault(task_id, Lock())
+    with lock:
+        yield
 
 
 @contextmanager
