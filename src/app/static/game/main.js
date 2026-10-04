@@ -131,11 +131,13 @@ class BootScene extends Phaser.Scene {
   create() {
     if (!this.textures.exists("floor")) makeTextures(this);
     const loading = this.add.text(20, 20, "Loading dungeon...", { fontFamily: FONT, fontSize: "12px" });
+    // `/api/rooms` returns the whole floor — rooms, the tile grid, and the
+    // corridor links — not a bare array. The client renders it and nothing more.
     Promise.all([api("/api/rooms"), api("/api/player"), api("/api/config")])
-      .then(([rooms, player, config]) => {
+      .then(([floor, player, config]) => {
         CFG = config;
         updateHud(player);
-        this.scene.start("dungeon", { rooms, player, spawnRoom: this.spawnRoom, spawnPoint: this.spawnPoint });
+        this.scene.start("dungeon", { floor, player, spawnRoom: this.spawnRoom, spawnPoint: this.spawnPoint });
       })
       .catch((err) => loading.setText(`Could not load the dungeon: ${err.message}`));
   }
@@ -147,7 +149,8 @@ class DungeonScene extends Phaser.Scene {
   }
 
   init(data) {
-    this.rooms = data.rooms;
+    this.floor = data.floor;
+    this.rooms = data.floor.rooms;
     this.stats = data.player;
     this.spawnRoom = data.spawnRoom;
     this.spawnPoint = data.spawnPoint;
@@ -259,13 +262,41 @@ class DungeonScene extends Phaser.Scene {
       .forEach((w) => w.destroy());
     this.add.image(doorX, doorY, "archway");
 
+    // Three things can be in a room, and the branch order matters: a safe room
+    // has no `enemy` at all (so touching room.enemy.tier above would crash on
+    // the entrance, which is room 0), and a blocked room is one the server has
+    // not unlocked yet, so it must not be walkable-into either.
     const labelY = (top ? 1 : 10) * T + 2;
     this.add
       .text(centerX, labelY, room.name, {
-        fontFamily: FONT, fontSize: "8px", color: TIER_COLOR[room.enemy.tier], align: "center",
-        wordWrap: { width: (ROOM_W - 1) * T - 8 },
+        fontFamily: FONT, fontSize: "8px",
+        color: room.blocked ? "#6b5f7d" : TIER_COLOR[room.enemy?.tier],
+        align: "center", wordWrap: { width: (ROOM_W - 1) * T - 8 },
       })
       .setOrigin(0.5, 0);
+
+    if (room.safe) {
+      // The shrine is a chest you may use once; the entrance is just a room.
+      this.add.image(centerX, enemyY, room.restore ? "chest" : "archway");
+      this.add.text(centerX, centerY + 26, room.cleared ? "SPENT" : room.restore ? "REST" : "SAFE", {
+        fontFamily: FONT, fontSize: "8px", color: room.cleared ? "#6b5f7d" : "#7bd389",
+      }).setOrigin(0.5, 0);
+      if (room.restore && !room.cleared) {
+        const shrine = this.physics.add.staticImage(centerX, enemyY, "chest");
+        this.physics.add.overlap(this.hero, shrine, () => this.useShrine(room));
+      }
+      return;
+    }
+
+    if (room.blocked) {
+      // Sealed: drawn, walkable around, but not enterable. The door out of the
+      // previous room is what opens it, and only the server decides that.
+      this.add.image(centerX, enemyY, "archway").setAlpha(0.25);
+      this.add.text(centerX, centerY + 26, "SEALED", {
+        fontFamily: FONT, fontSize: "8px", color: "#6b5f7d",
+      }).setOrigin(0.5, 0);
+      return;
+    }
 
     if (room.cleared) {
       this.add.image(centerX, enemyY, "chest");
@@ -280,6 +311,27 @@ class DungeonScene extends Phaser.Scene {
     if (room.index === this.stats.checkpoint && this.stats.checkpoint > 0) {
       this.add.text(centerX, centerY + 40, "▲ CHECKPOINT", { fontFamily: FONT, fontSize: "7px", color: "#4ea8de" })
         .setOrigin(0.5, 0);
+    }
+  }
+
+  // Resting is a server action like any other. The client does not decide that
+  // HP is full afterwards — it asks, and redraws the number the server sends.
+  async useShrine(room) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      const result = await api(`/api/rooms/${room.index}/enter`, { method: "POST" });
+      this.stats = result.player;
+      updateHud(this.stats);
+      this.hint.setText(result.restored ? `The shrine restores you. +${result.restored} HP.` : "");
+      this.time.delayedCall(600, () => {
+        // Reload the floor so the shrine redraws as SPENT and the newly-opened
+        // doors behind it appear, rather than guessing at that here.
+        this.scene.start("boot", { spawnRoom: room.index });
+      });
+    } catch (err) {
+      this.hint.setText(err.message);
+      this.busy = false;
     }
   }
 
@@ -306,7 +358,11 @@ class DungeonScene extends Phaser.Scene {
     );
     let hint = "";
     if (near && !near.cleared) {
-      hint = `${near.name} — a ${near.enemy.name} (${near.enemy.hp} HP, ${near.enemy.atk} ATK). Walk in to fight.`;
+      // Safe rooms have no enemy and blocked ones are not enterable, so this is
+      // three cases — reading near.enemy unconditionally crashed on room 0.
+      if (near.safe) hint = near.restore ? `${near.name} — a shrine. Walk in to rest.` : `${near.name} — safe ground.`;
+      else if (near.blocked) hint = `${near.name} — sealed. Clear the rooms leading here.`;
+      else hint = `${near.name} — a ${near.enemy.name} (${near.enemy.hp} HP, ${near.enemy.atk} ATK). Walk in to fight.`;
     }
     this.hint.setText(hint).setVisible(Boolean(hint));
   }
@@ -329,15 +385,55 @@ class BattleScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
     const enemy = this.room.enemy;
-    this.enemyHp = enemy.hp;
-    this.heroHp = this.stats.hp;
-    this.powerCooldown = 0;
-    this.defending = false;
+    // Open the fight on the server first. Everything below draws the response:
+    // enemy HP, the HP you walked in with, cooldowns. If the server refuses —
+    // someone else cleared the room, or it is sealed — there is no fight to
+    // draw, so we bail back to the map rather than showing a fight that the
+    // server does not consider to exist.
+    // `api` is the module-level helper, not a scene method — calling this.api()
+    // here was a TypeError the moment you walked into a fight.
+    api(`/api/rooms/${this.room.index}/enter`, { method: "POST" })
+      .then((result) => {
+        if (result.safe) {
+          // A safe room never reaches here (the map handles shrines), but if it
+          // does, there is nothing to fight and going back is the honest answer.
+          this.scene.start("boot", { spawnRoom: this.room.index });
+          return;
+        }
+        this.drawBattle(result.fight, enemy);
+      })
+      .catch((err) => this.failedToStart(err));
+  }
+
+  // The server refused to open the fight — sealed, already cleared, or offline.
+  failedToStart(err) {
+    this.add.text(this.scale.width / 2, this.scale.height / 2,
+      `Cannot enter: ${err.message}\n\nPress SPACE to go back.`, {
+        fontFamily: FONT, fontSize: "12px", color: "#e56b6f", align: "center",
+      }).setOrigin(0.5);
+    this.over = true;
+    this.result = "error";
+    this.settling = false;
+    // The key handlers normally live at the end of drawBattle, which never ran —
+    // so without this the message is a lie: SPACE would do nothing and the
+    // player would be stuck on this screen until they reloaded the page.
+    this.input.keyboard.on("keydown-SPACE", () => this.finish());
+  }
+
+  drawBattle(fight, enemy) {
+    const { width, height } = this.scale;
+    this.fight = fight;
+    this.heroHp = fight.hero.hp;
+    this.enemyHp = fight.enemy.hp;
+    this.powerCooldown = fight.power_cd;
+    this.defending = fight.defended;
     this.busy = false;
     this.over = false;
     // True while a win/lose write is in flight, so SPACE cannot skip ahead of it.
     this.settling = false;
-    this.buffs = { damage: 0, haste: 0, shield: 0 };
+    // Buff timers live in the server's state, not here. `this.buffs` used to be a
+    // client-side countdown that could disagree with the fight it was describing.
+    this.buffs = { ...(fight.buffs || {}) };
 
     this.add.rectangle(0, 0, width, height, 0x120d18).setOrigin(0);
     this.add.rectangle(0, height * 0.62, width, height * 0.38, 0x241c31).setOrigin(0);
@@ -411,9 +507,9 @@ class BattleScene extends Phaser.Scene {
       bar.fill.width = Math.max(0, (200 * hp) / max);
       bar.label.setText(`${Math.max(0, hp)} / ${max}`);
     };
-    set(this.heroBar, this.heroHp, this.stats.max_hp);
-    set(this.enemyBar, this.enemyHp, this.room.enemy.hp);
-    const active = Object.entries(this.buffs).filter(([, turns]) => turns > 0);
+    set(this.heroBar, this.fight.hero.hp, this.fight.hero.max_hp);
+    set(this.enemyBar, this.fight.enemy.hp, this.fight.enemy.max_hp);
+    const active = Object.entries(this.fight.buffs || {}).filter(([, turns]) => turns > 0);
     this.buffLine.setText(active.map(([k, t]) => `${potionShort(k)} ${t}`).join("  "));
   }
 
@@ -445,6 +541,13 @@ class BattleScene extends Phaser.Scene {
     this.menu.setVisible(!this.over);
     this.renderPotions();
     if (this.potionRow) this.potionRow.setVisible(!this.over);
+    // Once the fight is over the menu is hidden, so the only thing left to say is
+    // that SPACE continues. Fleeing in particular resolves without a win or a
+    // loss message, and without this the player is left staring at a dead screen
+    // not knowing whether the key still works.
+    if (this.over && !this.message.text.includes("Press SPACE")) {
+      this.say(`${this.message.text}\n\nPress SPACE to continue.`);
+    }
     this.refreshBars();
   }
 
@@ -464,127 +567,84 @@ class BattleScene extends Phaser.Scene {
     this.time.delayedCall(250, () => target.clearTint());
   }
 
-  roll() {
-    const [low, high] = CFG.damage_variance;
-    return Phaser.Math.FloatBetween(low, high);
-  }
+  // Local damage simulation is deliberately gone. `roll()` and `strike()` used to
+  // compute crits and damage with Math.random() in the browser, which is precisely
+  // the thing that made the server's balance numbers decorative — and which let a
+  // player post whatever HP they liked. Damage now comes from game.fight_step, and
+  // `tickBuffs()` went with it: buff expiry is the reducer's bookkeeping, so a
+  // second client-side countdown could only ever contradict the real fight.
 
-  // One attack. Returns the damage dealt so the caller can narrate it.
-  strike(power) {
-    const crit = Math.random() < CFG.crit_chance;
-    const rage = this.buffs.damage > 0 ? CFG.potion_effects.damage.mult : 1;
-    const dmg = Math.max(
-      CFG.min_damage,
-      Math.round(
-        this.stats.atk * this.roll() * (power ? CFG.power_mult : 1) * rage * (crit ? CFG.crit_mult : 1),
-      ),
-    );
-    this.enemyHp -= dmg;
-    this.hitEffect(this.enemySprite);
-    this.floatText(this.enemySprite.x, this.enemySprite.y - 60, `-${dmg}`, crit ? "#f2c14e" : "#ffffff");
-    return { dmg, crit };
-  }
-
-  tickBuffs() {
-    // One player action = one turn of each active buff.
-    for (const key of Object.keys(this.buffs)) {
-      if (this.buffs[key] > 0) this.buffs[key]--;
-    }
-  }
-
-  choose(action) {
+  // The server owns the fight. `this.fight` is its state, mirrored verbatim
+  // only so it can be drawn; every number on screen came from a response to
+  // POST /api/rooms/{id}/act, and none of it was computed in this file.
+  async choose(action) {
     if (action === "continue") return this.finish();
-    if (action === "flee" && (!this.busy || this.over)) return this.leave();
+    // Fleeing is free server-side, but it still goes through the API so the
+    // fight is closed out rather than left dangling.
+    if (action === "flee") return this.act("flee");
     if (this.busy || this.over) return;
-    if (action.startsWith("potion:")) return this.drink(action.slice("potion:".length));
-    if (action === "power" && this.powerCooldown) return this.say("Power Strike is still recharging!");
-
-    this.busy = true;
-    if (this.powerCooldown) this.powerCooldown--;
-    let text;
-    if (action === "attack" || action === "power") {
-      const power = action === "power";
-      if (power) this.powerCooldown = CFG.power_cooldown;
-      const first = this.strike(power);
-      let extra = "";
-      if (this.buffs.haste > 0) {
-        extra = ` Haste strikes again for ${this.strike(power).dmg}!`;
-      }
-      text = `${power ? "POWER STRIKE! " : ""}${first.crit ? "Critical hit! " : ""}You deal ${first.dmg} damage.${extra}`;
-    } else {
-      this.defending = true;
-      const heal = Math.min(CFG.defend_heal, this.stats.max_hp - this.heroHp);
-      this.heroHp += heal;
-      if (heal) this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `+${heal}`, "#7bd389");
-      text = `You raise your shield${heal ? ` and recover ${heal} HP` : ""}.`;
-    }
-    this.tickBuffs();
-    this.say(text);
-    this.refresh();
-
-    if (this.enemyHp <= 0) return this.time.delayedCall(500, () => this.win());
-    this.time.delayedCall(700, () => this.enemyTurn());
+    if (action.startsWith("potion:")) return this.act("potion", action.slice("potion:".length));
+    return this.act(action);
   }
 
-  // Drinking takes a turn, so a potion is a real choice and not a free heal.
-  async drink(category) {
+  async act(action, potion = null) {
+    if (this.busy || this.over) return;
     this.busy = true;
-    const effect = CFG.potion_effects[category];
     try {
-      const result = await api(`/api/potions/${category}/use`, {
+      const result = await api(`/api/rooms/${this.room.index}/act`, {
         method: "POST",
-        body: { room_index: this.room.index },
+        body: { action, potion },
       });
-      this.stats.potions = result.potions;
-      let text = `You drink ${effect.label}.`;
-      if (category === "heal") {
-        const healed = Math.min(effect.heal, this.stats.max_hp - this.heroHp);
-        this.heroHp += healed;
-        text = healed
-          ? `You drink ${effect.label} and recover ${healed} HP.`
-          : `You drink ${effect.label}, but you are already at full health.`;
-        if (healed) this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `+${healed}`, POTION_COLOR.heal);
-      } else {
-        this.buffs[category] = effect.turns;
-        const detail = {
-          damage: `Attacks hit ${effect.mult}× harder`,
-          haste: "You strike twice each turn",
-          shield: `Incoming damage is cut ${Math.round((1 - effect.reduction) * 100)}%`,
-        }[category];
-        text += ` ${detail} for ${effect.turns} turns.`;
+      this.applyFight(result);
+      // The server already knows the fight is over. Fleeing resolves as "fled",
+      // which carries no `resolved` block because nothing was earned or lost —
+      // so it needs handling separately from a win or a defeat.
+      if (this.fight.state === "fled") {
+        this.over = true;
+        this.result = "fled";
+        return this.refresh();
       }
-      this.tickBuffs();
-      this.say(text);
-      updateHud({ ...this.stats, hp: Math.max(0, this.heroHp) });
-      this.refresh();
-      this.time.delayedCall(700, () => this.enemyTurn());
+      if (result.resolved?.cleared) this.win();
+      else if (result.resolved && !result.resolved.cleared) this.lose();
     } catch (err) {
-      // The server rejected the spend — most likely a double-click raced the
-      // first request. Say so and hand the turn back without punishing.
+      // The server refused the action — a power strike on cooldown, or a potion
+      // already spent. Say so and hand the turn back without punishing.
       this.say(err.message);
-      this.refresh();
       this.busy = false;
     }
   }
 
-  enemyTurn() {
-    const enemy = this.room.enemy;
-    let dmg = Math.max(CFG.min_damage, Math.round(enemy.atk * this.roll()) - this.stats.defense);
-    if (this.defending) dmg = Math.ceil(dmg * CFG.defend_reduction);
-    if (this.buffs.shield > 0) dmg = Math.ceil(dmg * CFG.potion_effects.shield.reduction);
-    this.defending = false;
-    this.heroHp -= dmg;
-    this.tweens.add({ targets: this.enemySprite, x: this.enemySprite.x - 40, duration: 120, yoyo: true });
-    this.hitEffect(this.heroSprite);
-    this.cameras.main.shake(150, 0.006);
-    this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `-${dmg}`, "#e56b6f");
-    this.say(`${enemy.name} attacks for ${dmg} damage!`);
-    this.refresh();
-    if (this.heroHp <= 0) return this.lose();
+  // Mirror the server's state and narrate the lines it appended this turn.
+  // `log` is the server's own prose, so the client cannot drift from it.
+  applyFight(result) {
+    const before = this.fight;
+    this.fight = result.fight;
+    this.stats = result.player;
+
+    const added = this.fight.log.slice((before?.log || []).length);
+    this.say(added.join("\n"));
+    if (added.length) {
+      const heroDamage = this.fight.hero.hp < (before?.hero.hp ?? this.fight.hero.hp);
+      const enemyDamage = (this.fight.enemy?.hp ?? 0) < (before?.enemy?.hp ?? 0);
+      if (enemyDamage) this.hitEffect(this.enemySprite);
+      if (heroDamage) {
+        this.hitEffect(this.heroSprite);
+        this.cameras.main.shake(150, 0.006);
+      }
+    }
+
+    this.powerCooldown = this.fight.power_cd;
+    this.buffs = { ...(this.fight.buffs || {}) };
     this.busy = false;
+    this.refresh();
+    updateHud(this.stats);
   }
 
-  async win() {
+  // A win is already recorded: `act` returned `resolved`, because the same
+  // response that killed the enemy wrote the clear row. So there is no second
+  // "claim your reward" call to make — and no window in which a player could
+  // claim one without having fought.
+  win() {
     this.over = true;
     this.result = "won";
     this.settling = true;
@@ -594,58 +654,33 @@ class BattleScene extends Phaser.Scene {
     this.add.particles(this.enemySprite.x, this.enemySprite.y, "spark", {
       speed: { min: 80, max: 260 }, lifespan: 700, quantity: 40, tint: [0xf2c14e, 0xffffff, 0xe56b6f], emitting: false,
     }).explode(40);
-    this.say("Victory! Claiming the room...");
-    try {
-      // HP rides along with the clear: the server derives the next fight's HP
-      // from this row, so there is no separate mutable value to drift.
-      const result = await api(`/api/rooms/${this.room.index}/clear`, {
-        method: "POST",
-        body: { hp: this.heroHp },
-      });
-      this.stats = result.player;
-      updateHud(this.stats);
-      this.say(`Victory! ${this.room.name} is yours.\nRoom ${result.player.checkpoint + 1} cleared this week.\n\nPress SPACE to continue.`);
-      this.floatText(this.scale.width / 2, this.scale.height * 0.3, `ROOM ${result.player.checkpoint + 1}`, "#f2c14e");
-    } catch (err) {
-      this.say(`Victory... but the clear was refused: ${err.message}\n\nPress SPACE to continue.`);
-    }
+    const checkpoint = this.stats.checkpoint;
+    this.say(`Victory! ${this.room.name} is yours.\nRoom ${checkpoint + 1} cleared this week.\n\nPress SPACE to continue.`);
+    this.floatText(this.scale.width / 2, this.scale.height * 0.3, `ROOM ${checkpoint + 1}`, "#f2c14e");
     this.settling = false;
   }
 
-  // Defeat costs the potions you drank and the room you were standing in, and
-  // nothing else. You wake at the checkpoint with full health.
-  async lose() {
+  // A loss is also already recorded by `act`: the potions drunk this fight are
+  // spent and the checkpoint row has been rewritten to full, which is what
+  // "you wake up healed" means. The client only narrates it.
+  lose() {
     this.over = true;
     this.result = "lost";
     this.settling = true;
     this.refresh();
     this.tweens.add({ targets: this.heroSprite, alpha: 0.3, angle: -90, duration: 500 });
     const checkpoint = this.entryCheckpoint;
-    let restored = true;
-    try {
-      // Restores full HP on the checkpoint row. A 404 just means the player has
-      // never cleared anything this week, so there is nothing to restore — HP
-      // is already full in that case.
-      await api(`/api/rooms/${checkpoint}/hp`, { method: "POST", body: { hp: this.stats.max_hp } });
-    } catch {
-      restored = false;
-    }
     const where = checkpoint > 0 ? `Room ${checkpoint + 1}` : "the entrance hall";
-    const tail = restored ? ", fully healed" : "";
-    this.say(`You fall.\n\nYou wake at ${where}${tail}. The potions you drank are spent.\n\nPress SPACE to continue.`);
+    this.say(`You fall.\n\nYou wake at ${where}, fully healed. The potions you drank are spent.\n\nPress SPACE to continue.`);
     this.settling = false;
-  }
-
-  // Fleeing is free and costs nothing but the fight: you come back to the room
-  // you walked into, still holding every potion.
-  leave() {
-    this.scene.start("boot", { spawnRoom: this.spawnRoom });
   }
 
   finish() {
     // Wait for the win/lose write to land, or the next scene loads stale HP.
     if (!this.over || !this.result || this.settling) return;
     if (this.result === "lost") return this.scene.start("boot", { spawnRoom: this.entryCheckpoint });
+    if (this.result === "error") return this.scene.start("boot", { spawnRoom: this.spawnRoom });
+    if (this.result === "fled") return this.scene.start("boot", { spawnRoom: this.spawnRoom });
     this.scene.start("boot", { spawnRoom: this.room.index });
   }
 }
