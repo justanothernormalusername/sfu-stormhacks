@@ -1,3 +1,7 @@
+from contextlib import contextmanager
+from threading import Lock
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -23,16 +27,19 @@ class FriendIn(BaseModel):
     username: str
 
 
-class UseIn(BaseModel):
-    room_index: int | None = None
+class ActIn(BaseModel):
+    """One player action. Nothing else is accepted — deliberately.
 
+    There is no `hp` field, and that is the point of the whole rewrite. The old
+    client resolved the fight in JavaScript and then told the server how much HP
+    it had left, so `POST /api/rooms/{i}/clear` with `{hp: 100}` was a valid
+    request that took the boss. Damage, victory, and remaining HP are now the
+    server's numbers, computed by the same pure reducer the balance simulator
+    runs. A client that disagrees simply cannot express the disagreement.
+    """
 
-class ClearIn(BaseModel):
-    hp: int
-
-
-class HpIn(BaseModel):
-    hp: int
+    action: str = "attack"          # attack | power | defend | heal | potion | flee
+    potion: str | None = None       # required when action == "potion"
 
 
 def friend_ids(session: Session, user: User) -> set[int]:
@@ -60,8 +67,8 @@ def current_hp(session: Session, user: User, start) -> int:
 
     The checkpoint is the furthest room cleared, not the most recently cleared:
     they differ once you backtrack, and "how far in did I get" is the thing the
-    HP is attached to. A defeat rewrites that row back to full via
-    POST /api/rooms/{checkpoint}/hp, which is what restores you.
+    HP is attached to. A defeat rewrites that row back to full, which is what
+    restores you.
     """
     last = session.exec(
         select(BattleClear)
@@ -74,13 +81,23 @@ def current_hp(session: Session, user: User, start) -> int:
 
 
 def checkpoint_index(session: Session, user: User, start) -> int:
-    """The furthest room cleared this week — where a defeat sends you back."""
+    """The furthest room fought this week — where a defeat sends you back.
+
+    Safe rooms are excluded, and that exclusion is load-bearing rather than
+    cosmetic. The shrine is recorded in the same table as a clear, because there
+    is no second table for "I already used this" — so without this filter,
+    walking into the shrine would set the checkpoint to its room number and, worse,
+    put a player who has fought nothing at all near the top of the leaderboard.
+    Progress has to mean rooms fought.
+    """
+    floor = game.floor_for_week(start)
     rows = session.exec(
         select(BattleClear.room_index).where(
             BattleClear.user_id == user.id, BattleClear.week_start == start
         )
     ).all()
-    return max(rows) if rows else 0
+    fought = [r for r in rows if not floor["rooms"][r]["safe"]]
+    return max(fought) if fought else 0
 
 
 def potion_inventory(session: Session, user: User, start) -> dict[str, int]:
@@ -139,16 +156,84 @@ def get_config(user: User = Depends(current_user)):
 
 @router.get("/rooms")
 def get_rooms(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    """The shared dungeon for this week. Identical for every player; only the
-    cleared flags differ."""
+    """The shared floor for this week, with this player's progress folded in.
+
+    The map itself is identical for every player; only `cleared` differs. Rooms
+    also carry `blocked`, which is true for rooms the player cannot walk into yet
+    because they have no route there — the map is a graph, not a grid, so this is
+    computed from FLOOR_LINKS rather than assumed.
+    """
     start = game.week_start(utcnow())
+    floor = game.floor_for_week(start)
     cleared = {r.room_index for r in session.exec(
         select(BattleClear).where(BattleClear.user_id == user.id, BattleClear.week_start == start)
     ).all()}
-    rooms = game.rooms_for_week(start)
-    for room in rooms:
+    walkable = walkable_rooms(floor, cleared)
+    enterable = enterable_rooms(floor, cleared)
+    for room in floor["rooms"]:
         room["cleared"] = room["index"] in cleared
-    return rooms
+        # `blocked` is the single flag the client needs, and it has to mean
+        # exactly "the server will refuse to open a fight here" — i.e. the
+        # complement of `enterable`, not of `walkable`. Those differ, and using
+        # the wrong one is a real bug: rooms 1-3 are enterable from the entrance
+        # (you fight them from where you stand) while not walkable until won, so
+        # marking them blocked would draw three SEALED rooms the server happily
+        # lets you fight, and the player could never clear the first fight.
+        room["blocked"] = room["index"] not in enterable
+        # `walkable` is kept separately because the map draws a cleared room as
+        # somewhere you can stand, and the checkpoint spawn needs the geometry.
+        room["walkable"] = room["index"] in walkable
+    return floor
+
+
+def neighbours_of(floor: dict) -> dict[int, set[int]]:
+    """The floor as a graph. The map is authored as links, not as a grid, so
+    adjacency is read from FLOOR_LINKS rather than inferred from tile positions."""
+    neighbours: dict[int, set[int]] = {r["index"]: set() for r in floor["rooms"]}
+    for a, b in floor["links"]:
+        neighbours[a].add(b)
+        neighbours[b].add(a)
+    return neighbours
+
+
+def walkable_rooms(floor: dict, cleared: set[int]) -> set[int]:
+    """Rooms the player can physically stand in.
+
+    The dungeon is a graph whose doors open as you clear it, and there are two
+    different questions here that are easy to conflate:
+
+      * can I *stand* in this room — yes if it is safe (nothing to fight) or
+        already cleared, and I can reach it by walking;
+      * can I *fight* here — true for any room whose neighbour I can stand in.
+
+    Distinguishing them is what makes the floor playable at all. An earlier
+    version required every room on the path to be cleared, which deadlocked the
+    whole map: the entrance is safe, so it never has a clear row, so the flood
+    fill expanded through nothing and every other room was permanently sealed.
+    The entrance being safe is the case that breaks the naive version.
+    """
+    neighbours = neighbours_of(floor)
+    open_here = {r["index"] for r in floor["rooms"] if r["safe"] or r["index"] in cleared}
+    entrance = floor["rooms"][0]["index"]
+    walkable = {entrance}
+    stack = [entrance]
+    while stack:
+        for neighbour in neighbours.get(stack.pop(), ()):
+            if neighbour not in walkable and neighbour in open_here:
+                walkable.add(neighbour)
+                stack.append(neighbour)
+    return walkable
+
+
+def enterable_rooms(floor: dict, cleared: set[int]) -> set[int]:
+    """Rooms whose fight the player may start: walkable, or next to somewhere
+    they can stand. This is the set `enter` checks against."""
+    neighbours = neighbours_of(floor)
+    walkable = walkable_rooms(floor, cleared)
+    reach = set(walkable)
+    for room in walkable:
+        reach |= neighbours.get(room, set())
+    return reach
 
 
 @router.get("/tasks")
@@ -221,61 +306,269 @@ def complete_task(task_id: int, body: CompleteIn, user: User = Depends(current_u
     }
 
 
-@router.post("/rooms/{room_index}/clear")
-def clear_room(room_index: int, body: ClearIn, user: User = Depends(current_user),
-               session: Session = Depends(get_session)):
-    """Record a win. The room must exist on this week's map."""
+@router.post("/rooms/{room_index}/enter")
+def enter_room(room_index: int, user: User = Depends(current_user),
+               session: Session = Depends(get_session)) -> dict:
+    """Start a fight in a room, or use a safe room's effect.
+
+    The client sends nothing but a room index. Enemy stats, the player's HP, and
+    the fight seed are all decided here — which is the point. Previously the
+    browser resolved the fight and then told the server how much HP it had left,
+    so a player could post an arbitrary `hp` and take the boss for free.
+    """
     start = game.week_start(utcnow())
-    rooms = game.rooms_for_week(start)
-    if not 0 <= room_index < len(rooms):
+    floor = game.floor_for_week(start)
+    if not 0 <= room_index < len(floor["rooms"]):
         raise HTTPException(404, "No such room")
-    if session.exec(
-        select(BattleClear).where(
-            BattleClear.user_id == user.id,
-            BattleClear.week_start == start,
-            BattleClear.room_index == room_index,
-        )
-    ).first():
-        raise HTTPException(409, "Room already cleared this week")
-    hp = max(1, min(config.PLAYER_BASE["max_hp"], body.hp))
-    session.add(BattleClear(user_id=user.id, week_start=start, room_index=room_index, hp_after=hp))
-    session.commit()
-    return {"cleared": rooms[room_index]["index"], "player": player_stats(session, user)}
+    room = floor["rooms"][room_index]
+
+    cleared = {r.room_index for r in session.exec(
+        select(BattleClear).where(BattleClear.user_id == user.id, BattleClear.week_start == start)
+    ).all()}
+    if room_index in cleared:
+        raise HTTPException(409, "You have already cleared that room this week")
+    if room_index not in enterable_rooms(floor, cleared):
+        raise HTTPException(403, "You cannot reach that room yet")
+
+    # Safe rooms: the shrine restores once per visit and the entrance is a no-op.
+    if room["safe"]:
+        restored = 0
+        if room.get("restore"):
+            # Restoring is recorded as a clear of the shrine. That reuses the one
+            # append-only row type the floor already has, so "have I used the
+            # shrine this week" stays a question the database answers.
+            session.add(BattleClear(user_id=user.id, week_start=start,
+                                    room_index=room_index,
+                                    hp_after=config.PLAYER_BASE["max_hp"]))
+            session.commit()
+            restored = room["restore"]
+        return {"room": room, "safe": True, "restored": restored,
+                "player": player_stats(session, user)}
+
+    seed = f"{user.id}|{start.isoformat()}|{room_index}|{uuid4().hex}"
+    # Under the same lock as `act`, so two simultaneous enters cannot both mint a
+    # fight: the second would otherwise overwrite the first, and the player would
+    # have taken a turn against a state they never saw.
+    with fight_lock(user, room_index, start):
+        state = game.new_fight(room, hero_stats(session, user, start),
+                               potion_inventory(session, user, start), seed)
+        record_fight_start(session, user, state, start)
+    return {"room": room, "safe": False, "fight": public_fight(state),
+            "player": player_stats(session, user)}
 
 
-@router.post("/rooms/{room_index}/hp")
-def report_hp(room_index: int, body: HpIn, user: User = Depends(current_user),
-              session: Session = Depends(get_session)):
-    """Carry HP out of a fight, written onto that room's clear row."""
+def hero_stats(session: Session, user: User, start) -> dict:
+    return {
+        "hp": current_hp(session, user, start),
+        "max_hp": config.PLAYER_BASE["max_hp"],
+        "atk": config.PLAYER_BASE["atk"],
+        "defense": config.PLAYER_BASE["defense"],
+    }
+
+
+@router.post("/rooms/{room_index}/act")
+def act(room_index: int, body: ActIn, user: User = Depends(current_user),
+        session: Session = Depends(get_session)) -> dict:
+    """Take one action in the current fight, and resolve the enemy's turn.
+
+    The whole of combat happens here. The client sends an action name and
+    renders the state that comes back; it never computes damage, never decides
+    whether it won, and cannot claim HP it did not have.
+    """
     start = game.week_start(utcnow())
-    clear = session.exec(
+    floor = game.floor_for_week(start)
+    if not 0 <= room_index < len(floor["rooms"]):
+        raise HTTPException(404, "No such room")
+    room = floor["rooms"][room_index]
+    if room["safe"]:
+        raise HTTPException(409, "Nothing to fight in there")
+
+    # The read-modify-write below has to be atomic. Two `act` requests landing at
+    # once (a double-click, or a spammed key) would otherwise both load the same
+    # turn-3 state, both resolve it, and both write their outcome — so a player
+    # could spend one potion twice, or record a win the enemy never allowed. The
+    # lock covers load -> step -> save, so the second request sees the first one's
+    # result and is refused on its own terms (cooldown, no fight, already cleared).
+    with fight_lock(user, room_index, start):
+        state = load_fight(session, user, room_index, start)
+        if state is None:
+            raise HTTPException(409, "No fight in progress there")
+
+        # Cooldown is enforced here, not in the client: the client is told
+        # `power_cd` so it can grey the button out, but it is not what stops a
+        # spammed request.
+        if body.action == "power" and state["power_cd"] > 0:
+            raise HTTPException(409, f"Power strike needs {state['power_cd']} more turn(s)")
+
+        # A potion must be in the derived inventory, checked against the DB
+        # rather than the fight snapshot, so a client cannot resurrect a potion it
+        # already spent by replaying a stale state.
+        potion = body.potion
+        if body.action == "potion":
+            if potion not in config.POTION_CATEGORIES:
+                raise HTTPException(400, "No such potion")
+            if potion_inventory(session, user, start).get(potion, 0) < 1:
+                raise HTTPException(409, "You have none of those left this week")
+
+        try:
+            state = game.fight_step(state, body.action, potion)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        # Potions are spent by writing a row, the moment they are drunk — not when
+        # the fight ends. Otherwise a client that abandons a fight keeps the
+        # potions it already used, and refreshing the page is an infinite heal.
+        if body.action == "potion":
+            session.add(PotionUse(user_id=user.id, category=potion, used_at=utcnow(),
+                                  room_index=room_index))
+            session.commit()
+
+        resolved = None
+        if state["state"] == "won":
+            resolved = record_fight_win(session, user, state, start)
+        elif state["state"] == "lost":
+            resolved = record_fight_loss(session, user, state, start)
+
+        save_fight(session, user, state, room_index, start)
+
+    return {"fight": public_fight(state), "player": player_stats(session, user),
+            "resolved": resolved}
+
+
+# --- Fight state ----------------------------------------------------------
+#
+# An in-progress fight lives in the session cookie's signed sibling: a short-lived
+# server-side dict keyed by user. It is deliberately NOT a database column.
+#
+# The reasoning: a fight is ephemeral and untrusted-adjacent. If HP lived in a
+# column, a player could rewrite it, and the project's whole claim is that there
+# is no mutable stat to edit. If fights were rows, every swing would be an
+# insert and a defeat would need cleanup. Keeping them in memory means a restart
+# simply drops an unfinished fight — the player walks back in, full HP, nothing
+# lost — which is exactly the right failure mode for something that never
+# mattered. Clears and potion uses remain append-only rows in the database.
+#
+# The seed is per-fight random, so two players in the same room get different
+# fights, and a player cannot replay a sequence of lucky rolls.
+
+_FIGHTS: dict[tuple[int, int, str], dict] = {}
+_FIGHT_LOCK = Lock()
+# One lock per fight, not one global lock. A single mutex would serialise every
+# player's turns against each other; keying it by fight means two players — or one
+# player in two different rooms — never wait on each other, while any single fight
+# is still strictly serialised.
+_FIGHT_LOCKS: dict[tuple[int, int, str], Lock] = {}
+
+
+@contextmanager
+def fight_lock(user: User, room_index: int, start):
+    """Serialise all mutation of one in-progress fight.
+
+    FastAPI serves each request in a thread, so without this two overlapping
+    requests could both read turn N and both write turn N+1 — silently discarding
+    one of them, and in the potion case writing two `PotionUse` rows for a single
+    drink. Keyed per (user, room, week) so unrelated fights never contend.
+
+    Locks are created under the global lock and never evicted. That is bounded by
+    players × rooms for the current week, which is trivial at this scale, and an
+    unbounded-growth bug would be worse than a small leak. They do reset when the
+    process restarts, and stale weeks are harmless — they are just never taken
+    again once the fight is gone.
+    """
+    key = _fight_key(user, room_index, start)
+    with _FIGHT_LOCK:
+        lock = _FIGHT_LOCKS.setdefault(key, Lock())
+    with lock:
+        yield
+
+
+def _fight_key(user: User, room_index: int, start) -> tuple[int, int, str]:
+    """Keyed by week as well as user and room.
+
+    Scoping to the week matters for correctness, not tidiness: a fight left open
+    on Sunday would otherwise still be in memory on Monday, letting a player
+    resume a fight against last week's map — with the enemy's HP from a week ago
+    and the potion window already refilled. `start` is part of the key, so the
+    Monday reset drops every fight in progress, which is the intent.
+    """
+    return (user.id, room_index, start.isoformat())
+
+
+def record_fight_start(session: Session, user: User, state: dict, start) -> None:
+    with _FIGHT_LOCK:
+        _FIGHTS[_fight_key(user, state["room_index"], start)] = state
+
+
+def load_fight(session: Session, user: User, room_index: int, start) -> dict | None:
+    with _FIGHT_LOCK:
+        return _FIGHTS.get(_fight_key(user, room_index, start))
+
+
+def save_fight(session: Session, user: User, state: dict, room_index: int, start) -> None:
+    with _FIGHT_LOCK:
+        key = _fight_key(user, room_index, start)
+        # A resolved fight is dropped, so the next `enter` is a genuinely new
+        # fight with a new seed rather than a replay of a won one.
+        if state["state"] == "fight":
+            _FIGHTS[key] = state
+        else:
+            _FIGHTS.pop(key, None)
+
+
+def public_fight(state: dict) -> dict:
+    """Strip the seed before the fight goes to the browser.
+
+    The seed determines every damage roll. Handing it to the client would let a
+    player compute the whole fight locally, see the outcome, and simply not send
+    the losing turns — so it stays server-side. The client gets the state it needs
+    to draw and nothing it needs to predict.
+    """
+    return {k: v for k, v in state.items() if k != "seed"}
+
+
+def record_fight_win(session: Session, user: User, state: dict, start) -> dict:
+    """Persist a won fight. `hp_after` is the server's own number."""
+    room_index = state["room_index"]
+    hp = max(1, min(config.PLAYER_BASE["max_hp"], state["hero"]["hp"]))
+    existing = session.exec(
         select(BattleClear).where(
             BattleClear.user_id == user.id,
             BattleClear.week_start == start,
             BattleClear.room_index == room_index,
         )
     ).first()
-    if clear is None:
-        raise HTTPException(404, "Clear that room first")
-    clear.hp_after = max(1, min(config.PLAYER_BASE["max_hp"], body.hp))
-    session.add(clear)
+    if existing:
+        existing.hp_after = hp
+        session.add(existing)
+    else:
+        session.add(BattleClear(user_id=user.id, week_start=start,
+                                room_index=room_index, hp_after=hp))
     session.commit()
-    return {"ok": True}
+    return {"room_index": room_index, "hp_after": hp, "cleared": True}
 
 
-@router.post("/potions/{category}/use")
-def use_potion(category: str, body: UseIn, user: User = Depends(current_user),
-               session: Session = Depends(get_session)):
-    """Spend one potion. Availability is derived, never sent by the client."""
-    if category not in config.POTION_CATEGORIES:
-        raise HTTPException(404, "No such potion")
-    start = game.week_start(utcnow())
-    if potion_inventory(session, user, start).get(category, 0) < 1:
-        raise HTTPException(409, "You have none of those left this week")
-    session.add(PotionUse(user_id=user.id, category=category, used_at=utcnow(),
-                          room_index=body.room_index))
-    session.commit()
-    return {"ok": True, "potions": potion_inventory(session, user, start)}
+def record_fight_loss(session: Session, user: User, state: dict, start) -> dict:
+    """Persist a defeat: the potions drunk are gone, and you wake at your last
+    cleared room at full health. Nothing else is taken."""
+    checkpoint = checkpoint_index(session, user, start)
+    restored = 0
+    if checkpoint is not None:
+        # Rewriting the checkpoint row back to full is what "you wake up healed"
+        # means. It is the furthest *cleared* room, not this one, so backing out
+        # of a failed fight does not cost progress.
+        clear = session.exec(
+            select(BattleClear).where(
+                BattleClear.user_id == user.id,
+                BattleClear.week_start == start,
+                BattleClear.room_index == checkpoint,
+            )
+        ).first()
+        if clear is not None:
+            clear.hp_after = config.PLAYER_BASE["max_hp"]
+            session.add(clear)
+            session.commit()
+            restored = clear.hp_after
+    return {"checkpoint": checkpoint, "restored_to": restored, "cleared": False}
 
 
 @router.get("/log")
