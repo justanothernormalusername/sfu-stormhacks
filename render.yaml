@@ -5,9 +5,10 @@ services:
     plan: free
     # The registered .tech domain. Render will not go live on it until the DNS
     # records it lists are created at the registrar — see README "Deploy".
+    # Only the root is declared: Render auto-adds www and redirects it to the
+    # root, so listing both here is redundant.
     domains:
       - mylost.tech
-      - www.mylost.tech
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
