@@ -12,52 +12,132 @@
   </form>
   <p id="msg" class="muted"></p>
 </section>
-<section class="panel">
+<section class="panel" id="week-panel" hidden>
+  <h1>This week</h1>
+  <p id="week-line" class="muted"></p>
+  <div class="bar" id="week-bar" role="progressbar" aria-labelledby="week-line"
+       aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+    <div id="week-fill"></div>
+  </div>
+</section>
+<section class="panel" id="goals-panel" hidden>
+  <h1>Goals</h1>
+  <p class="muted">One-off quests, kept apart from your routines. Finishing one closes
+  it for good — there is no second payout, so make it count.</p>
+  <ul id="goals" class="list"></ul>
+</section>
+<section class="panel" id="routines-panel">
+  <h1>Routines</h1>
+  <p class="muted">These come back around. Each one can be banked again once its
+  window passes.</p>
   <ul id="tasks" class="list"></ul>
   <p id="empty" class="muted" hidden>No quests yet. Add one above so you have something to drink before the next room.</p>
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
-const KIND_LABEL = { daily: "Daily", monthly: "Monthly", goal: "Goal" };
-const POTION_LABEL = { heal: "Heal", damage: "Rage", haste: "Haste", shield: "Aegis" };
+// A classic script, so the awaits live in an async IIFE rather than at the top
+// level. Everything the page needs is read after that first fetch resolves —
+// labels are never captured at parse time, which is what would break if
+// /api/config and /api/tasks ever disagreed about a name.
+(async () => {
+// Every label, glyph and balance number is read from the server rather than
+// written down again here — /api/config is served verbatim, so renaming a
+// constant in config.py changes this page with no edit to this file.
+const CFG = await api("/api/config");
+const KINDS = Object.keys(CFG.kind_labels);
+
+const kindText = (kind) => `${CFG.kind_glyphs[kind]} ${CFG.kind_labels[kind]}`;
+const potionName = (cat) => CFG.potion_effects[cat]?.short ?? cat;
+
+// The three-way cadence control. `aria-pressed` on a button group gives it the
+// same semantics as a radio group without the arrow-key bookkeeping; every
+// button is focusable and the current choice is announced.
+function kindPicker(task) {
+  const wrap = el("span", { class: "kind-picker" });
+  for (const kind of KINDS) {
+    const on = kind === task.kind;
+    const btn = el("button", {
+      class: "kind-choice" + (on ? " on" : ""),
+      "aria-pressed": on ? "true" : "false",
+      title: `${CFG.kind_labels[kind]} — change this quest's window`,
+    }, kindText(kind));
+    btn.onclick = async () => {
+      // PATCH carries the window and nothing else, so this cannot change the
+      // potion or the count — only when the quest can be banked again.
+      await api(`/api/tasks/${task.id}`, { method: "PATCH", body: { kind } });
+      render();
+    };
+    wrap.append(btn);
+  }
+  return wrap;
+}
+
+function row(task) {
+  const li = el("li", { class: "item kind-" + task.kind });
+  li.append(
+    kindPicker(task),
+    el("span", { class: "grow" }, task.title),
+    el("span", { class: "tag" }, `${potionName(task.potion)} ×${task.potions}`),
+  );
+  if (task.done) {
+    li.append(el("span", { class: "done" }, "✔ Banked this period"));
+  } else {
+    const btn = el("button", {}, "I did it");
+    btn.onclick = async () => {
+      const note = prompt("Optional note for your party (what did you do?)") ?? "";
+      const result = await api(`/api/tasks/${task.id}/complete`, { method: "POST", body: { note } });
+      const total = Object.values(result.potions).reduce((a, b) => a + b, 0);
+      document.getElementById("msg").textContent =
+        `+${result.potions_earned} ${potionName(result.category)} potion(s). You now carry ${total}.`;
+      render();
+    };
+    li.append(btn);
+  }
+  const archive = el("button", { class: "icon", title: "Archive quest" }, "✕");
+  archive.onclick = async () => {
+    if (confirm("Archive this quest? Its history stays in the log.")) {
+      await api(`/api/tasks/${task.id}`, { method: "DELETE" });
+      render();
+    }
+  };
+  li.append(archive);
+  return li;
+}
+
+// The bar is derived, not stored: the target is simply how many active quests
+// the player is carrying, so archiving one rescales it and the weekly reset
+// needs no cleanup. A quest completed three times is one step, not three.
+function renderWeek(weekly) {
+  const panel = document.getElementById("week-panel");
+  panel.hidden = !weekly || weekly.target === 0;
+  if (panel.hidden) return;
+  const line = document.getElementById("week-line");
+  line.textContent = `${weekly.banked} of ${weekly.target} quests banked — resets Monday.`;
+  const bar = document.getElementById("week-bar");
+  bar.setAttribute("aria-valuemax", String(weekly.target));
+  bar.setAttribute("aria-valuenow", String(weekly.banked));
+  bar.setAttribute("aria-valuetext", line.textContent);
+  document.getElementById("week-fill").style.width = `${weekly.pct * 100}%`;
+}
 
 async function render() {
-  const tasks = await api("/api/tasks");
-  const list = document.getElementById("tasks");
-  list.replaceChildren();
+  const [tasks, player] = await Promise.all([api("/api/tasks"), api("/api/player")]);
+  renderWeek(player.weekly);
+
+  // Goals sit in their own section so "what am I working toward" is visible
+  // without scrolling, and so a one-off achievement is not listed among the
+  // things you meant to do again tomorrow.
+  const goals = tasks.filter((t) => t.kind === "goal");
+  const routines = tasks.filter((t) => t.kind !== "goal");
+  document.getElementById("goals-panel").hidden = goals.length === 0;
+  document.getElementById("goals").replaceChildren(...goals.map(row));
+  // Hide the routines panel only when it would be genuinely empty *and* there
+  // are goals above it. With no quests at all it stays visible, because that
+  // is where the "add one above" prompt lives.
+  document.getElementById("routines-panel").hidden = routines.length === 0 && goals.length > 0;
+  document.getElementById("tasks").replaceChildren(...routines.map(row));
   document.getElementById("empty").hidden = tasks.length > 0;
-  for (const task of tasks) {
-    const li = el("li", { class: "item kind-" + task.kind });
-    li.append(
-      el("span", { class: "tag" }, KIND_LABEL[task.kind]),
-      el("span", { class: "grow" }, task.title),
-      el("span", { class: "tag" }, `${POTION_LABEL[task.potion] ?? task.potion} ×${task.potions}`),
-    );
-    if (task.done) {
-      li.append(el("span", { class: "done" }, "✔ Banked this period"));
-    } else {
-      const btn = el("button", {}, "I did it");
-      btn.onclick = async () => {
-        const note = prompt("Optional note for your party (what did you do?)") ?? "";
-        const result = await api(`/api/tasks/${task.id}/complete`, { method: "POST", body: { note } });
-        const total = Object.values(result.potions).reduce((a, b) => a + b, 0);
-        document.getElementById("msg").textContent =
-          `+${result.potions_earned} ${POTION_LABEL[result.category] ?? result.category} potion(s). You now carry ${total}.`;
-        render();
-      };
-      li.append(btn);
-    }
-    const archive = el("button", { class: "icon", title: "Archive quest" }, "✕");
-    archive.onclick = async () => {
-      if (confirm("Archive this quest? Its history stays in the log.")) {
-        await api(`/api/tasks/${task.id}`, { method: "DELETE" });
-        render();
-      }
-    };
-    li.append(archive);
-    list.append(li);
-  }
 }
 
 document.getElementById("new-task").onsubmit = async (e) => {
@@ -67,11 +147,12 @@ document.getElementById("new-task").onsubmit = async (e) => {
   btn.disabled = true;
   btn.textContent = "Reading it…";
   try {
+    // Title only. The model decides the potion and the count, and suggests a
+    // window — which the player changes on the row with the picker below.
     const task = await api("/api/tasks", { method: "POST", body: { title: form.get("title") } });
     e.target.reset();
-    const potion = POTION_LABEL[task.potion] ?? task.potion;
     document.getElementById("msg").textContent =
-      `Added. It reads as ${KIND_LABEL[task.kind].toLowerCase()} and pays ${task.potions} ${potion} potion${task.potions === 1 ? "" : "s"}.`;
+      `Added. It reads as ${kindText(task.kind)} and pays ${task.potions} ${potionName(task.potion)} potion${task.potions === 1 ? "" : "s"}. Change the window on its row if that reads wrong.`;
   } finally {
     btn.disabled = false;
     btn.textContent = "Add quest";
@@ -79,5 +160,6 @@ document.getElementById("new-task").onsubmit = async (e) => {
   render();
 };
 render();
+})();
 </script>
 {% endblock %}

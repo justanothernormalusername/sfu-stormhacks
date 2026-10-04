@@ -22,6 +22,8 @@ async function render() {
     const li = el("li", { class: "item kind-" + entry.kind + (entry.flagged ? " flagged" : "") });
     li.append(
       el("span", { class: "time" }, new Date(entry.completed_at).toLocaleString()),
+      // Glyph + word, so the window is legible without relying on border colour.
+      el("span", { class: "tag" }, `${entry.kind_glyph} ${entry.kind_label}`),
       el("span", { class: "grow" }, entry.task + (entry.note ? ` · "${entry.note}"` : "")),
     );
     if (entry.flagged) {

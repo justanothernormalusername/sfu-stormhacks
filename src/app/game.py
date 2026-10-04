@@ -516,6 +516,31 @@ def inventory(completions: list[Completion], tasks_by_id: dict[int, Task],
     return {k: max(0, v) for k, v in earned.items() if v > 0}
 
 
+def weekly_progress(tasks: list[Task], completions: list[Completion],
+                    start: datetime) -> dict:
+    """How much of the player's own quest list they got through this week.
+
+    Fully derived — the target is just how many quests they are carrying, so
+    archiving one rescales the bar on its own and nothing has to be migrated or
+    reset on Monday. It also means there is no number to edit dishonestly: the
+    target is not a stored goal the player typed.
+
+    Counts *distinct* active tasks banked this week, not completion rows: a
+    daily completed on three separate days is one step, not three, otherwise the
+    bar would fill from repeating a single quest.
+
+    Death does not touch this. `record_fight_loss` deletes BattleClear rows and
+    writes PotionUse rows, but Completion is append-only and survives — the real
+    work was really done, and losing a fight does not undo it.
+    """
+    active_ids = {t.id for t in tasks if t.active}
+    banked = {c.task_id for c in completions
+              if c.completed_at >= start and c.task_id in active_ids}
+    target = len(active_ids)
+    return {"banked": len(banked), "target": target,
+            "pct": (len(banked) / target) if target else 0.0}
+
+
 def potions_for(task: Task) -> int:
     """How many potions one completion of this task pays.
 

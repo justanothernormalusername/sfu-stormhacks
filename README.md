@@ -6,10 +6,10 @@ Your to-do list is a dungeon — but in v2 the list no longer _is_ the map. Ever
 
 - **You type a quest title. That's the whole form.** No dropdown, no reward picker. [Jev](https://ai.hackclub.com/proxy/v1/jev/systemone) reads the title in one call and answers three questions at once:
   - **Which potion** — Heal, Rage, Haste, or Aegis
-  - **How often you'd genuinely repeat it** — daily, monthly, or a one-off goal
+  - **How often you'd repeat it** — daily, monthly, or a one-off goal. This one is only a suggestion: how often *you* repeat something isn't something a title can say, so you pick the window on the quest board and the model's guess is just preselected.
   - **How much effort it is** — a continuous score on a five-rung scale
-- **The count is never asked for.** The effort score is mapped onto a bounded range in `config.py` (`POTION_MIN`–`POTION_MAX`, currently 1–4). So no quest title, however worded, can buy a reward outside that range — writing "the hardest task imaginable" gets you the same ceiling as genuinely doing it. Retune those two numbers and every existing quest re-scales, because quests store the score rather than the count.
-- **If Jev is unreachable**, the keyword rules pick the potion, the quest repeats daily, and it pays the floor. Failing low is deliberate: an outage must never be worth exploiting.
+- **The count is never asked for.** The effort score is mapped onto a bounded range in `config.py` (`POTION_MIN`–`POTION_MAX`, currently 1–5). So no quest title, however worded, can buy a reward outside that range — writing "the hardest task imaginable" gets you the same ceiling as genuinely doing it. Retune those two numbers and every existing quest re-scales, because quests store the score rather than the count.
+- **If Jev is unsure or unreachable**, the keyword rules pick the potion, the quest repeats daily, and it pays the floor. This is the normal path, not just the failure one — Jev returns a probability for every option, and anything under `POTION_CONFIDENCE_MIN` is overruled by the keyword table rather than accepted on a coin flip. Failing low on the *count* is deliberate: an outage must never be worth exploiting.
 - **Depth** is the score. Furthest room cleared in your current run, on the leaderboard, next to your party. Health carries between fights. Death resets cleared rooms, shrines, active fights, and all potions, then returns you to the entrance hall fully healed. Quests and their completion history stay intact. Fleeing returns you to the central hallway outside the room and keeps your run progress.
 
 Every completion is timestamped by the server in a log your party can see and flag, so nobody can fake their way up.

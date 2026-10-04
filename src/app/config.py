@@ -14,6 +14,9 @@ here:
     Every enemy tougher ..... ENEMY_HP, ENEMY_ATK
     Player stronger ......... PLAYER_BASE
     Potions worth more ...... POTION_MIN, POTION_MAX, POTION_EFFECTS
+    Which potion a task pays  POTION_CATEGORY_CRITERIA, POTION_CATEGORY_KEYWORDS,
+                               POTION_CONFIDENCE_MIN
+    Quest windows ........... KIND_CRITERIA, KIND_LABEL, KIND_GLYPH
     Longer/shorter floor .... FLOOR_ROOMS (and FLOOR_LINKS)
     Floor pacing ............ ROOM_CLEAR_HEAL, MAX_DAMAGE, DAMAGE_VARIANCE
     Weekly reset ............ WEEK_START_DAY
@@ -390,8 +393,15 @@ PLAYER_BASE = {
 # player never chooses a number: the classifier scores how much effort the task
 # actually is, and the score is mapped onto MIN..MAX here. Change these two and
 # every existing quest re-scales, because quests store the score, not the count.
+#
+# MAX is 5 rather than 4 because EFFORT_SCALE has five rungs and a 1..4 range
+# collapses them: round(1 + d*3) paid 1, 2, 2, 3, 4, so "a few minutes" and "a
+# real chunk of an evening" paid identically and the top rung was barely
+# distinguishable. Do not fix this by adding a rung to EFFORT_SCALE instead —
+# `_normalized` divides by len(scale) - 1, so lengthening it silently rescales
+# every stored difficulty.
 POTION_MIN = 1
-POTION_MAX = 4
+POTION_MAX = 5
 
 # If the classifier cannot be reached, quests fall back to the bottom of the
 # range. Failing closed matters: paying out the maximum on an API outage would
@@ -415,33 +425,82 @@ POTION_EFFECTS = {
 
 DEFAULT_CATEGORY = "heal"
 
-# Keyword fallback for the potion categorizer. Ordered: first match wins, so
-# put specific words above general ones. This is the shipping path — the
-# classifier in categorize.py only refines it.
+# Keyword fallback for the potion categorizer, and the shipping path whenever the
+# classifier is unreachable. Two properties matter here:
+#
+# 1. **Ordered: first match wins.** A specific key must precede a general one it
+#    would otherwise lose to.
+# 2. **Coverage is a correctness concern, not a nicety.** Titles that match nothing
+#    do NOT quietly become heal any more — they stay a miss (see `_from_keywords`)
+#    — but they still end up at DEFAULT_CATEGORY, so a thin table means more of
+#    the game quietly reading as heal. These lists are deliberately broad.
+#
+# Matching is on whole words, not substrings, so "restaurant" no longer collides
+# with "rest" and "meeting" no longer collides with "eat".
 POTION_CATEGORY_KEYWORDS = {
-    "heal": ["sleep", "rest", "nap", "water", "hydrate", "eat", "meal", "walk",
-             "stretch", "yoga", "meditate", "breathe", "recover", "health"],
+    "heal": ["sleep", "rest", "nap", "water", "hydrate", "eat", "meal", "breakfast",
+             "lunch", "dinner", "cook", "walk", "stretch", "yoga", "meditate",
+             "breathe", "recover", "health", "doctor", "dentist", "medicine",
+             "pharmacy", "therapy", "massage", "vaccine", "sick", "bed"],
     "damage": ["gym", "run", "lift", "workout", "exercise", "train", "push",
-               "sprint", "fight", "practice", "code", "write", "ship", "study"],
+               "sprint", "fight", "practice", "code", "write", "ship", "study",
+               "read", "learn", "essay", "exam", "revise", "build", "bike", "hike",
+               "swim", "climb", "garden", "mow", "lawn", "homework", "project"],
     "haste": ["rush", "quick", "fast", "urgent", "deadline", "submit", "finish",
-              "clean", "tidy", "organize", "inbox", "quickly"],
+              "clean", "tidy", "organize", "inbox", "quickly", "email", "reply",
+              "respond", "errand", "errands", "groceries", "grocery", "shopping",
+              "shop", "laundry", "dishes", "trash", "garbage", "recycling", "fold",
+              "vacuum", "towel", "restock", "deliver", "pickup"],
     "shield": ["protect", "backup", "save", "review", "check", "plan", "prepare",
-               "budget", "insurance", "backup", "safety"],
+               "budget", "insurance", "safety", "file", "taxes", "tax", "book",
+               "schedule", "cancel", "renew", "refill", "prescription", "apply",
+               "research", "compare", "bill", "bills", "pay", "feed", "cat",
+               "dog", "pet"],
 }
 
-# How the classifier weighs each potion. These descriptions do the real work:
-# the model picks between criteria rather than inventing a label, so "recovery,
-# food, sleep" is a much better signal for Heal than the bare word "heal".
+# How the classifier weighs each potion. These descriptions do the real work: the
+# model picks between criteria rather than inventing a label.
+#
+# They are written against **what the task does to the person afterwards**, not
+# what it is about. The earlier wording ("rest, recovery, food, water, sleep...")
+# described topics, so anything vaguely restorative landed on Heal — and because
+# Heal is also the fallback, it won every tie. Anchoring on the effect is what
+# makes the four mutually exclusive.
 POTION_CATEGORY_CRITERIA = {
-    "heal": "rest, recovery, food, water, sleep, stretching, looking after yourself",
-    "damage": "training, effort, pushing hard, focused deep work, attacking a deadline",
-    "haste": "speed, urgency, clearing a backlog, finishing something quickly",
-    "shield": "protecting yourself, reviewing, planning, saving up, preparing for later",
+    "heal": "the task restores the person — sleep, food, rest, recovery, looking "
+            "after their body. They end it less worn down than they started.",
+    "damage": "the task is exertion or force — training, hard physical work, "
+              "pushing through resistance, going hard at something difficult.",
+    "haste": "the task is speed and momentum — clearing a backlog, finishing fast, "
+             "urgency, getting something done in a rush.",
+    "shield": "the task is protection and preparation — reviewing, budgeting, "
+              "backing up, planning ahead, guarding against a future problem.",
 }
 
-# The classifier picks the repeat window too, so the player never chooses one.
-# Each option describes how often someone would genuinely do this, which is the
-# judgement we want rather than "whatever the user felt like clicking".
+# Appended to the potion question. Heal is both a real category and the fallback,
+# so without this the model has no reason to prefer the narrower reading.
+POTION_CATEGORY_TIEBREAK = (
+    "When two categories fit, pick the narrower one. Heal is the last resort, "
+    "not the default: only choose it when the task genuinely restores the person."
+)
+
+# The minimum probability on the chosen option for the model's answer to be
+# believed. Below it, the keyword rules decide instead.
+#
+# The API has always returned `probabilities` for every option and the parser
+# discarded them, so a coin-flip verdict and a confident one were treated
+# identically. Read `probabilities[choice]`, never the `confidence` field — the two
+# disagree (0.86 vs 0.9 on a live call) and `confidence` is on its own scale.
+#
+# Do not push this below 0.5: a wrong answer can still be confident. Raise it if
+# Heal still dominates once the keyword table is doing its job.
+POTION_CONFIDENCE_MIN = 0.55
+
+# The classifier suggests the repeat window so the board has something preselected
+# when a quest is created — but the player overrides it via PATCH /tasks/{id},
+# and should. Each option describes how often someone would genuinely do this,
+# which is the judgement we want rather than "whatever the user felt like
+# clicking", but the honest answer is that intent is not knowable from a title.
 KIND_CRITERIA = {
     "daily": "a daily habit, done most days",
     "monthly": "a recurring chore, done roughly once a month",
@@ -563,3 +622,9 @@ CLASSIFIER_URL = "https://ai.hackclub.com/proxy/v1/jev/systemone"
 CLASSIFIER_TIMEOUT = 6.0
 
 KIND_LABEL = {"daily": "Daily", "monthly": "Monthly", "goal": "Goal"}
+
+# A shape per kind, so the repeat window is not communicated by colour alone.
+# The quest board used to distinguish daily/monthly/goal by border colour only,
+# which is invisible to a colourblind player; PROJECT_BRIEF §5.4 and
+# PITCH_IDEAS both ask for a glyph. The colour stays as reinforcement.
+KIND_GLYPH = {"daily": "▲", "monthly": "◆", "goal": "★"}

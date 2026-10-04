@@ -18,6 +18,17 @@ class TaskIn(BaseModel):
     title: str
 
 
+class TaskKindIn(BaseModel):
+    """A repeat-window override. The player may correct the model's guess.
+
+    Deliberately *only* the window. The potion and the count are never
+    client-settable: they derive from the classifier's cached effort score, and
+    `kind` cannot reach either, because `potions_for` reads `difficulty` alone.
+    So overriding this can never be used to buy a bigger reward.
+    """
+    kind: str
+
+
 class CompleteIn(BaseModel):
     note: str = ""
 
@@ -88,13 +99,17 @@ def furthest_room_index(session: Session, user: User, start) -> int:
     return max(fought) if fought else 0
 
 
-def potion_inventory(session: Session, user: User, start) -> dict[str, int]:
+def potion_inventory(session: Session, user: User, start,
+                     completions=None, tasks=None) -> dict[str, int]:
     # Archiving only hides a quest from the board. Its completed work and reward
     # remain real, so inventory must resolve completions against archived tasks.
-    tasks = all_tasks_by_id(session, user.id)
-    completions = session.exec(
-        select(Completion).where(Completion.user_id == user.id, Completion.completed_at >= start)
-    ).all()
+    if tasks is None:
+        tasks = all_tasks_by_id(session, user.id)
+    if completions is None:
+        completions = session.exec(
+            select(Completion).where(Completion.user_id == user.id,
+                                     Completion.completed_at >= start)
+        ).all()
     uses = session.exec(
         select(PotionUse).where(PotionUse.user_id == user.id, PotionUse.used_at >= start)
     ).all()
@@ -118,7 +133,15 @@ def _task_view(task: Task) -> dict:
 
 def player_stats(session: Session, user: User) -> dict:
     start = game.week_start(utcnow())
-    inventory = potion_inventory(session, user, start)
+    # Loaded once and shared. `weekly_progress` needs every task, archived
+    # included, or archiving a quest would quietly un-bank real work; the
+    # inventory needs the same tasks plus this week's completions. One query
+    # each, rather than loading all of them twice.
+    tasks = all_tasks_by_id(session, user.id)
+    completions = session.exec(
+        select(Completion).where(Completion.user_id == user.id)
+    ).all()
+    inventory = potion_inventory(session, user, start, completions, tasks)
     return {
         "username": user.username,
         "max_hp": config.PLAYER_BASE["max_hp"],
@@ -128,6 +151,7 @@ def player_stats(session: Session, user: User) -> dict:
         "potions": inventory,
         "potions_total": sum(inventory.values()),
         "furthest_room": furthest_room_index(session, user, start),
+        "weekly": game.weekly_progress(list(tasks.values()), list(completions), start),
     }
 
 
@@ -155,6 +179,7 @@ def get_config(user: User = Depends(current_user)):
         "potion_effects": config.POTION_EFFECTS,
         "potion_categories": list(config.POTION_CATEGORIES),
         "kind_labels": config.KIND_LABEL,
+        "kind_glyphs": config.KIND_GLYPH,
         "damage_variance": list(config.DAMAGE_VARIANCE),
         "crit_chance": config.CRIT_CHANCE,
         "crit_mult": config.CRIT_MULT,
@@ -273,13 +298,34 @@ def create_task(body: TaskIn, user: User = Depends(current_user), session: Sessi
         raise HTTPException(400, "Task needs a title")
     title = title[:120]
     # Judged once here, never in the gameplay path. The player chooses neither
-    # the potion nor the count — both come back from the classifier.
+    # the potion nor the count — both come back from the classifier. The repeat
+    # window is only a suggestion; `PATCH /tasks/{id}` lets them correct it.
     verdict = categorize.classify(title)
     task = Task(user_id=user.id, title=title, kind=verdict["kind"],
                 potion_category=verdict["category"], difficulty=verdict["difficulty"])
     session.add(task)
     session.commit()
     session.refresh(task)
+    return _task_view(task)
+
+
+@router.patch("/tasks/{task_id}")
+def set_task_kind(task_id: int, body: TaskKindIn, user: User = Depends(current_user),
+                  session: Session = Depends(get_session)):
+    """Correct the repeat window the model guessed.
+
+    This exists because that guess is not really knowable from a title. How often
+    someone would genuinely repeat "Go for a 5k run" is a fact about them, not
+    about the words — and the model called it a one-time goal at 53% confidence,
+    which `period_start` turns into `datetime.min`, locking the quest for good.
+    A wrong `goal` is the one label the player cannot otherwise walk back.
+    """
+    task = own_task(session, user, task_id)
+    if body.kind not in game.KINDS:
+        raise HTTPException(400, "Unknown repeat window")
+    task.kind = body.kind
+    session.add(task)
+    session.commit()
     return _task_view(task)
 
 
@@ -612,8 +658,15 @@ def get_log(username: str | None = None, user: User = Depends(current_user),
         select(Completion, Task).join(Task, Task.id == Completion.task_id)
         .where(Completion.user_id == target.id).order_by(Completion.completed_at.desc())
     ).all()
+    # The glyph travels with the entry rather than being fetched separately: the
+    # log is history, not a control, and one request is better than two. It is
+    # here because the log page otherwise distinguishes daily/monthly/goal by
+    # border colour alone, which is invisible to a colourblind player.
     return [
-        {"id": c.id, "task": t.title, "kind": t.kind, "completed_at": c.completed_at.isoformat() + "Z",
+        {"id": c.id, "task": t.title, "kind": t.kind,
+         "kind_glyph": config.KIND_GLYPH.get(t.kind, ""),
+         "kind_label": config.KIND_LABEL.get(t.kind, t.kind),
+         "completed_at": c.completed_at.isoformat() + "Z",
          "note": c.note, "flagged": c.flagged_by is not None,
          "potion": t.potion_category or config.DEFAULT_CATEGORY}
         for c, t in rows

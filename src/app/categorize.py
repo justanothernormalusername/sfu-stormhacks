@@ -21,13 +21,21 @@ Every failure path returns a usable answer. A missing key, a timeout, a
 malformed response, or a value the game does not define falls back field by
 field — the keyword rules for the category, a daily for the repeat window, and
 the bottom of the range for the reward.
+
+The repeat window in particular is only a *suggestion*. How often someone would
+genuinely repeat a task is a fact about the player's intent, which a title
+cannot carry — the model reads "Go for a 5k run" as a one-time goal at 53%
+confidence, which would lock the quest forever. The player overrides it.
 """
 
 import json
+import re
 import urllib.error
 import urllib.request
 
 from . import config
+
+_WORDS = re.compile(r"[a-z]+")
 
 
 def classify(title: str) -> dict:
@@ -38,12 +46,53 @@ def classify(title: str) -> dict:
     """
     answers = _from_classifier(title)
     return {
-        "category": _valid(answers.get("potion"), config.POTION_CATEGORIES)
-        or _from_keywords(f"{title} {config.DEFAULT_KIND}"),
+        "category": _category(answers, title),
         "kind": _valid(answers.get("kind"), config.KIND_CRITERIA)
         or config.DEFAULT_KIND,
         "difficulty": _normalized(answers.get("effort")),
     }
+
+
+def _category(answers: dict, title: str) -> str:
+    """One potion category, from whichever source is most trustworthy.
+
+    A confident model answer wins. Otherwise the keyword table decides, and only
+    if it too comes up empty does the default apply.
+
+    This ordering is the fix for a real bias: the keyword table used to be
+    consulted only when the entire call failed, and *its* miss answered
+    DEFAULT_CATEGORY. With no key configured, two thirds of ordinary titles
+    therefore became heal — the fallback was the common case, not the last resort.
+    Now a miss stays a miss all the way here, where it is visible.
+    """
+    chosen = _valid(answers.get("potion"), config.POTION_CATEGORIES)
+    if chosen and _confident(answers.get("potion_raw")):
+        return chosen
+    return _from_keywords(title) or config.DEFAULT_CATEGORY
+
+
+def _confident(answer) -> bool:
+    """Is this answer worth believing?
+
+    The API returns a `probabilities` map over every option, and the parser used
+    to throw it away — so an answer the model was barely sure of was accepted
+    exactly like a confident one. Read the probability of the option actually
+    chosen, and treat anything unparseable as unconfident: a malformed
+    distribution must never read as certainty.
+
+    Read `probabilities[choice]`, never the sibling `confidence` field. They
+    disagree on a live call (0.86 vs 0.9), so `confidence` is on its own scale
+    and cannot be thresholded against one.
+    """
+    if not isinstance(answer, dict):
+        return False
+    choice, probs = answer.get("choice"), answer.get("probabilities")
+    if not isinstance(choice, str) or not isinstance(probs, dict):
+        return False
+    top = probs.get(choice)
+    if isinstance(top, bool) or not isinstance(top, (int, float)):
+        return False
+    return top >= config.POTION_CONFIDENCE_MIN
 
 
 def potions_for(difficulty: float | None) -> int:
@@ -65,12 +114,31 @@ def _valid(value: str | None, allowed) -> str | None:
     return value if value in allowed else None
 
 
-def _from_keywords(text: str) -> str:
-    lowered = text.lower()
-    for category, words in config.POTION_CATEGORY_KEYWORDS.items():
-        if any(word in lowered for word in words):
+def _from_keywords(text: str) -> str | None:
+    """Match whole words, and admit it when nothing matched.
+
+    Substring matching put "restaurant" in the heal bucket via "rest", and
+    "meeting" there via "eat". Splitting into words fixes both, and costs
+    nothing.
+
+    Plural forms are folded in, because whole-word matching drops them: without
+    this, "answer emails" and "pay the bills" miss an `email` and a `bill` that
+    are in the table. Only a trailing "s" is stripped, which covers the ordinary
+    cases without the false stems a real stemmer introduces.
+
+    Returning None matters more than the fix. This used to answer
+    DEFAULT_CATEGORY whenever nothing matched, which silently swallowed most real
+    task titles — the caller now decides, so a miss stays visible.
+    """
+    words = set()
+    for word in _WORDS.findall(text.lower()):
+        words.add(word)
+        if word.endswith("s") and len(word) > 3:
+            words.add(word[:-1])
+    for category, keys in config.POTION_CATEGORY_KEYWORDS.items():
+        if words & set(keys):
             return category
-    return config.DEFAULT_CATEGORY
+    return None
 
 
 def _normalized(raw) -> float | None:
@@ -118,7 +186,9 @@ def _from_classifier(title: str) -> dict:
                 "type": "choice",
                 "instructions": (
                     "Which potion should this real-life task reward? Judge what "
-                    "doing the task actually is, not how urgent it feels."
+                    "doing the task actually does for the person afterwards, not "
+                    "what it is about. A task about sleep that is really about a "
+                    "deadline is haste, not heal. " + config.POTION_CATEGORY_TIEBREAK
                 ),
                 "criteria": config.POTION_CATEGORY_CRITERIA,
             },
@@ -126,7 +196,8 @@ def _from_classifier(title: str) -> dict:
                 "type": "choice",
                 "instructions": (
                     "How often would someone genuinely repeat this, without being "
-                    "asked? Pick the window they would actually keep up."
+                    "asked? Pick the window they would actually keep up. When it "
+                    "is genuinely unclear, prefer the window that allows repeats."
                 ),
                 "criteria": config.KIND_CRITERIA,
             },
@@ -134,7 +205,8 @@ def _from_classifier(title: str) -> dict:
                 "type": "score",
                 "instructions": (
                     "How much real effort does doing this take, on a normal day "
-                    "when nobody is motivating the person?"
+                    "when nobody is motivating the person? Judge time and energy "
+                    "together — a hard ten-minute task is not a long easy one."
                 ),
                 "criteria": config.EFFORT_SCALE,
             },
@@ -154,6 +226,9 @@ def _from_classifier(title: str) -> dict:
 
     return {
         "potion": _field(answers, "potion", "choice"),
+        # The whole answer object, so `_confident` can read the `probabilities`
+        # the choice came with. The three plain fields above cannot carry it.
+        "potion_raw": answers.get("potion") if isinstance(answers, dict) else None,
         "kind": _field(answers, "kind", "choice"),
         "effort": _field(answers, "effort", "score"),
     }

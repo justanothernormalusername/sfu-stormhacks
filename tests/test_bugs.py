@@ -188,7 +188,7 @@ if r.status_code == 200:
     # silently rendering `undefined` into the HUD.
     for key in ("room_count", "potion_categories", "potion_effects",
                 "player", "potion_min", "potion_max", "kind_labels",
-                "boss_hp_cap"):
+                "kind_glyphs", "boss_hp_cap"):
         check(f"/api/config publishes {key!r}", key in cfg)
     # The HUD prints this as "Room n / room_count", so it has to equal the number
     # of rooms actually on the floor — that is the whole reason it is derived.
@@ -197,6 +197,14 @@ if r.status_code == 200:
           f"config says {cfg['room_count']}, floor has {floor_rooms}")
     check("potion_categories are all described by potion_effects",
           set(cfg["potion_categories"]) <= set(cfg["potion_effects"]))
+    # The quest board indexes both maps with a kind straight out of the
+    # database, so a key that drifts renders `undefined` rather than raising.
+    # The glyphs exist precisely so cadence is not signalled by colour alone.
+    check("kind_labels and kind_glyphs cover the same kinds",
+          sorted(cfg["kind_labels"]) == sorted(cfg["kind_glyphs"]),
+          f"{sorted(cfg['kind_labels'])} vs {sorted(cfg['kind_glyphs'])}")
+    check("every kind has a non-empty glyph",
+          all(g for g in cfg["kind_glyphs"].values()))
 
 print("\n=== 8. The boss HP ceiling is honoured, and can be unbounded ===")
 # BOSS_HP_CAP is a ceiling on the depth curve. Two ways it can go wrong without

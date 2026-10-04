@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from datetime import timedelta
 
 os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp()}/reset.db"
 os.environ["SECRET_KEY"] = "test-reset"
@@ -106,6 +107,86 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(completed.status_code, 200)
         self.assertEqual(client.get("/api/player").json()["potions_total"],
                          completed.json()["potions_earned"])
+
+    def test_weekly_progress_is_derived_and_outlives_death(self):
+        """The progress bar measures real life, so a dungeon reset cannot touch it.
+
+        It is derived rather than stored — target is the count of active quests,
+        banked is the distinct active quests completed inside the week window —
+        which means there is no column to keep in sync and nothing for the
+        weekly reset to clear. Death is the real test: `record_fight_loss`
+        deletes BattleClear rows and writes compensating PotionUse rows, so
+        anything reading those tables would drop to zero here. This reads
+        Completion, which is append-only, and so it should not move.
+        """
+        init_db()
+        client = TestClient(app)
+        client.post("/login", data={"username": "progress", "password": "hunter22",
+                                    "action": "register"})
+        start = game.week_start(utcnow())
+        with Session(engine) as session:
+            user = session.exec(select(User).where(User.username == "progress")).one()
+            ids = []
+            for i in range(4):
+                task = Task(user_id=user.id, title=f"quest {i}", kind="daily",
+                            potion_category="heal", difficulty=1)
+                session.add(task)
+                session.flush()
+                ids.append(task.id)
+            for task_id in ids[:3]:
+                session.add(Completion(user_id=user.id, task_id=task_id, note="done"))
+            # A completion from before the week window, which must not count.
+            stale = Task(user_id=user.id, title="last week", kind="daily",
+                         potion_category="heal", difficulty=1)
+            session.add(stale)
+            session.flush()
+            session.add(Completion(user_id=user.id, task_id=stale.id, note="old",
+                                   completed_at=start - timedelta(days=3)))
+            # A second completion of an already-banked quest: one step, not two.
+            session.add(Completion(user_id=user.id, task_id=ids[0], note="again",
+                                   completed_at=start + timedelta(hours=1)))
+            session.commit()
+            stale_id = stale.id
+            user_id = user.id
+
+        weekly = client.get("/api/player").json()["weekly"]
+        self.assertEqual(weekly["target"], 5)
+        self.assertEqual(weekly["banked"], 3)
+        self.assertEqual(weekly["pct"], 3 / 5)
+
+        # Archiving lowers the target by one, so the bar cannot end up with a slot
+        # that can never be filled again. It is progress through *this week's*
+        # board, not an all-time tally.
+        client.delete(f"/api/tasks/{stale_id}")
+        weekly = client.get("/api/player").json()["weekly"]
+        self.assertEqual(weekly["target"], 4)
+        self.assertEqual(weekly["banked"], 3)
+
+        # Now die, and the bar must not move. The fight is mutated in place under the
+        # lock, because the JSON the client got back is a copy — editing it would
+        # only edit the test's own dict.
+        rooms = client.get("/api/rooms").json()
+        room = next(r for r in rooms["rooms"] if not r["safe"] and not r["blocked"])
+        self.assertEqual(client.post(f"/api/rooms/{room['index']}/enter").status_code, 200)
+        with api._FIGHT_LOCK:
+            key = (user_id, room["index"], start.isoformat())
+            fight = api._FIGHTS[key]
+            fight["hero"]["hp"] = 1
+            fight["enemy"]["hp"] = 10000
+            fight["enemy"]["atk"] = 10000
+            fight["profile"] = {}
+        lost = client.post(f"/api/rooms/{room['index']}/act",
+                           json={"action": "attack"}).json()
+        self.assertEqual(lost["fight"]["state"], "lost")
+        self.assertTrue(lost["resolved"]["reset"])
+
+        after = client.get("/api/player").json()
+        self.assertEqual(after["potions_total"], 0)
+        self.assertEqual(after["weekly"], weekly)
+        # The log outlives the run too, and so does the bar's evidence for it.
+        # Every completion row is still there — including the stale one, which
+        # the bar ignores but the history keeps.
+        self.assertEqual(len(client.get("/api/log").json()), 5)
 
 
 if __name__ == "__main__":
