@@ -1,6 +1,8 @@
 # Task Dungeon (SFU StormHacks)
 
-Your to-do list is a dungeon — but in v2 the list no longer *is* the map. Every player gets the same twelve-room dungeon, generated fresh each Monday and identical for everyone. There are no locked doors and nothing to unlock. Your real-life quests are preparation: finish one and it pays potions into a pack you carry into the next fight. The dungeon is beatable with potions you earned outside the app, or on nerve alone.
+Play Here: https://mylost.tech/play
+
+Your to-do list is a dungeon — but in v2 the list no longer _is_ the map. Every player gets the same twelve-room dungeon, generated fresh each Monday and identical for everyone. There are no locked doors and nothing to unlock. Your real-life quests are preparation: finish one and it pays potions into a pack you carry into the next fight. The dungeon is beatable with potions you earned outside the app, or on nerve alone.
 
 - **You type a quest title. That's the whole form.** No dropdown, no reward picker. [Jev](https://ai.hackclub.com/proxy/v1/jev/systemone) reads the title in one call and answers three questions at once:
   - **Which potion** — Heal, Rage, Haste, or Aegis
@@ -18,7 +20,7 @@ There is no XP column, no level column, no potion-count column, and no "HP" fiel
 
 This is not just tidiness. It means the client cannot cheat by editing a number it was handed — the server recomputes from rows and simply disagrees. It is the strongest technical claim in the project, and it is enforced by the database rather than by application checks.
 
-The one judgement the server *does* cache is the classifier's verdict on a quest — potion, repeat window, and effort score, all frozen when the quest is created so gameplay never waits on a network call. What it deliberately does not cache is the reward: the potion *count* is recomputed from the score every time, which is why the bounds in `config.py` are the only thing that decides what a quest is worth.
+The one judgement the server _does_ cache is the classifier's verdict on a quest — potion, repeat window, and effort score, all frozen when the quest is created so gameplay never waits on a network call. What it deliberately does not cache is the reward: the potion _count_ is recomputed from the score every time, which is why the bounds in `config.py` are the only thing that decides what a quest is worth.
 
 ## Run locally
 
@@ -40,12 +42,12 @@ There are no migrations — tables are created on startup. Changing the schema m
 
 ### Configuration
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `SECRET_KEY` | **yes in production** | Signs the session cookie. The fallback is regenerated every process start, which logs everyone out on restart. |
-| `DATABASE_URL` | no | Defaults to `sqlite:///./dungeon.db`. |
-| `APP_TZ` | no | Defaults to `America/Vancouver`. Day and week boundaries follow it. |
-| `CLASSIFIER_API_KEY` | no | Enables Jev. Without it, quests pay the minimum via keyword rules alone. |
+| Variable             | Required              | Purpose                                                                                                        |
+| -------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `SECRET_KEY`         | **yes in production** | Signs the session cookie. The fallback is regenerated every process start, which logs everyone out on restart. |
+| `DATABASE_URL`       | no                    | Defaults to `sqlite:///./dungeon.db`.                                                                          |
+| `APP_TZ`             | no                    | Defaults to `America/Vancouver`. Day and week boundaries follow it.                                            |
+| `CLASSIFIER_API_KEY` | no                    | Enables Jev. Without it, quests pay the minimum via keyword rules alone.                                       |
 
 For local work, put these in a `.env` file at the repo root — it is gitignored, and `config.py` reads it as a fallback for the environment. On Render there is no file, so set them as real environment variables.
 
