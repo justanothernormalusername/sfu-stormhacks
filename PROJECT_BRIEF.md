@@ -405,14 +405,16 @@ This section exists because the prize is for domain creativity, not for overall 
 
 **Connection to v2.** The subdomain-per-floor idea fits the new model naturally: since progress becomes "which floor you are on," each floor gets its own shareable address. This makes it the strongest candidate under the revised design, and it is the one that also improves the product rather than decorating it.
 
-**Still undecided as of 2026-10-04.** The owner was claiming the domain and had not chosen an idea. Note the fourth idea's framing ("XP is *committed*") depends on XP, which v2 has dropped — if it is chosen, its flavour text needs rewriting.
+**The domain is registered: `mylost.tech` (as of 2026-10-04).** The idea is still undecided. Concrete forms the four candidates take with this domain: `floor1.mylost.tech` / `boss.mylost.tech` for subdomain-as-level, `kai.mylost.tech` for party identity, `mylost.tech` for the shared world, and `mylost.tech` again for the TLD-as-theme framing. The first two need a **wildcard** DNS record (`*.mylost.tech` CNAME to the same Render target) rather than two host records; `mylost.tech` and `www.mylost.tech` are already declared in `render.yaml`.
+
+**Note on the fourth idea:** its framing ("XP is *committed*") depends on XP, which v2 has dropped. If it is chosen, its flavour text needs rewriting — the equivalent line is that potions are *distilled*, and the log is a commit history.
 
 ---
 
 ## 9. Constraints for anyone continuing this work
 
 - **Two prize tracks are in play (§1).** Serve both with one build. When time forces a choice, prefer the domain idea that *also* improves the product — it is the only option that scores on both axes. Never let Track B work degrade Track A quality, since a working, polished project is what Track A judges.
-- **Deployment is the critical path, not a wrap-up task.** `render.yaml` exists but has never been run, and the `.tech` domain has not been claimed. Subdomain routing for §8.1 **cannot be tested without a live address**, so get a bare "hello" version on the domain early, before adding features, and deploy a minimal build in parallel with feature work (§0.8 step 11).
+- **Deployment is the critical path, not a wrap-up task.** `render.yaml` exists but has never been run. `mylost.tech` is registered and now declared in the blueprint, but no DNS record points at it yet. Subdomain routing for §8.1 **cannot be tested without a live address**, so get a bare "hello" version on the domain early, before adding features, and deploy a minimal build in parallel with feature work (§0.8 step 11).
 - **Demo-breaking risks, all of which have bitten before:** a live database that sleeps, a missing or rotated `SECRET_KEY`, and data that does not survive a redeploy. **Verify data survives a redeploy before the presentation window** — do not assume it.
 - **Time:** approximately 3 hours of team time remained in the original hackathon window per v1. **Confirm the current figure with the owner — this figure is almost certainly stale.**
 - **Skill mix:** the team is Python-comfortable and beginner-to-intermediate. Frontend and game code are less well covered, so favour backend changes and mechanical tasks that can be delegated (art sourcing, styling, seeding scripts, deployment).

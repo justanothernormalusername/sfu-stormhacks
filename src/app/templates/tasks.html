@@ -3,44 +3,52 @@
 {% block content %}
 <section class="panel">
   <h1>Quest Board</h1>
-  <p class="muted">Every quest becomes a room. Finish it in real life to unlock the door.</p>
+  <p class="muted">Every player walks the same dungeon this week. Quests are how you
+  prepare: finish one in real life and it pays potions into your pack, ready for the
+  next fight. No quest opens a door — all of them are open from the start.</p>
   <form id="new-task" class="row">
     <input name="title" placeholder="e.g. Go for a 20 min run" required maxlength="120">
     <select name="kind">
-      <option value="daily">Daily · mob · 10 XP</option>
-      <option value="monthly">Monthly · mini-boss · 50 XP</option>
-      <option value="goal">Goal · boss · 200 XP</option>
+      <option value="daily">Daily · 1 potion</option>
+      <option value="monthly">Monthly · 2 potions</option>
+      <option value="goal">Goal · 4 potions</option>
     </select>
     <button>Add quest</button>
   </form>
+  <p id="msg" class="muted"></p>
 </section>
 <section class="panel">
   <ul id="tasks" class="list"></ul>
-  <p id="empty" class="muted" hidden>No quests yet. Add one above to build your first room.</p>
+  <p id="empty" class="muted" hidden>No quests yet. Add one above so you have something to drink before the next room.</p>
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
 const KIND_LABEL = { daily: "Daily", monthly: "Monthly", goal: "Goal" };
+const POTION_LABEL = { heal: "Heal", damage: "Rage", haste: "Haste", shield: "Aegis" };
 
 async function render() {
-  const rooms = await api("/api/rooms");
+  const tasks = await api("/api/tasks");
   const list = document.getElementById("tasks");
   list.replaceChildren();
-  document.getElementById("empty").hidden = rooms.length > 0;
-  for (const room of rooms) {
-    const li = el("li", { class: "item kind-" + room.kind });
+  document.getElementById("empty").hidden = tasks.length > 0;
+  for (const task of tasks) {
+    const li = el("li", { class: "item kind-" + task.kind });
     li.append(
-      el("span", { class: "tag" }, KIND_LABEL[room.kind]),
-      el("span", { class: "grow" }, room.title),
+      el("span", { class: "tag" }, KIND_LABEL[task.kind]),
+      el("span", { class: "grow" }, task.title),
+      el("span", { class: "tag" }, `${POTION_LABEL[task.potion] ?? task.potion} ×${task.potions}`),
     );
-    if (room.unlocked) {
-      li.append(el("span", { class: "done" }, room.cleared ? "✔ Cleared" : "🔓 Door open"));
+    if (task.done) {
+      li.append(el("span", { class: "done" }, "✔ Banked this period"));
     } else {
       const btn = el("button", {}, "I did it");
       btn.onclick = async () => {
         const note = prompt("Optional note for your party (what did you do?)") ?? "";
-        await api(`/api/tasks/${room.task_id}/complete`, { method: "POST", body: { note } });
+        const result = await api(`/api/tasks/${task.id}/complete`, { method: "POST", body: { note } });
+        const total = Object.values(result.potions).reduce((a, b) => a + b, 0);
+        document.getElementById("msg").textContent =
+          `+${result.potions_earned} ${POTION_LABEL[result.category] ?? result.category} potion(s). You now carry ${total}.`;
         render();
       };
       li.append(btn);
@@ -48,7 +56,7 @@ async function render() {
     const archive = el("button", { class: "icon", title: "Archive quest" }, "✕");
     archive.onclick = async () => {
       if (confirm("Archive this quest? Its history stays in the log.")) {
-        await api(`/api/tasks/${room.task_id}`, { method: "DELETE" });
+        await api(`/api/tasks/${task.id}`, { method: "DELETE" });
         render();
       }
     };
@@ -62,6 +70,7 @@ document.getElementById("new-task").onsubmit = async (e) => {
   const form = new FormData(e.target);
   await api("/api/tasks", { method: "POST", body: { title: form.get("title"), kind: form.get("kind") } });
   e.target.reset();
+  document.getElementById("msg").textContent = "Quest added. Finish it to stock potions.";
   render();
 };
 render();

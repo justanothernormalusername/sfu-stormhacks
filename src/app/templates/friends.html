@@ -11,6 +11,7 @@
 </section>
 <section class="panel">
   <h2>Weekly Leaderboard</h2>
+  <p class="muted">Everyone fights the same weekly dungeon, so depths are directly comparable.</p>
   <ol id="board" class="list"></ol>
 </section>
 {% endblock %}
@@ -25,8 +26,7 @@ async function render() {
     li.append(
       el("span", { class: "rank" }, ["🥇", "🥈", "🥉"][i] ?? `#${i + 1}`),
       el("span", { class: "grow" }, `${row.username}${row.is_you ? " (you)" : ""}`),
-      el("span", { class: "tag" }, `Lv ${row.level}`),
-      el("span", { class: "xp" }, `${row.weekly_xp} XP`),
+      el("span", { class: "tag" }, `Room ${row.furthest_room + 1}`),
       el("a", { href: `/log?username=${encodeURIComponent(row.username)}` }, "View log"),
     );
     list.append(li);

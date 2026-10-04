@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import NaiveDatetime
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -18,10 +19,14 @@ class User(SQLModel, table=True):
 
 
 class Task(SQLModel, table=True):
+    """A real-life quest. Completing one earns potions; it no longer gates a room."""
+
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     title: str
     kind: str  # "daily" | "monthly" | "goal"
+    # Cached at creation time by the categorizer, so gameplay never calls an API.
+    potion_category: Optional[str] = None
     active: bool = True
     created_at: NaiveDatetime = Field(default_factory=utcnow)
 
@@ -37,24 +42,39 @@ class Completion(SQLModel, table=True):
     flagged_by: Optional[int] = Field(default=None, foreign_key="user.id")
 
 
-class RoomClear(SQLModel, table=True):
-    """A room beaten in-game. XP is only ever derived from these rows."""
+class BattleClear(SQLModel, table=True):
+    """A room in the weekly dungeon beaten in-game.
+
+    Replaces the old RoomClear. The gate is gone, so a completion no longer
+    implies a clear: the player can fight any room any number of times, and
+    clears are scoped to a week rather than to a completion. The unique
+    constraint is what makes one-clear-per-room-per-week a database guarantee
+    rather than an application check.
+    """
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    task_id: int = Field(foreign_key="task.id", index=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    completion_id: int = Field(foreign_key="completion.id", unique=True)
-    xp: int
+    week_start: NaiveDatetime = Field(index=True)
+    room_index: int
+    # HP carried out of this fight. Current HP is derived from the most recent
+    # clear, so there is still no mutable HP field to edit.
+    hp_after: int
     cleared_at: NaiveDatetime = Field(default_factory=utcnow)
 
+    __table_args__ = (
+        UniqueConstraint("user_id", "week_start", "room_index", name="uq_clear_per_room_week"),
+    )
 
-class Item(SQLModel, table=True):
+
+class PotionUse(SQLModel, table=True):
+    """Append-only record of a potion consumed. Inventory is earned minus used,
+    so nothing here is ever updated or deleted."""
+
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    name: str
-    atk: int = 0
-    defense: int = 0
-    found_at: NaiveDatetime = Field(default_factory=utcnow)
+    category: str
+    used_at: NaiveDatetime = Field(default_factory=utcnow, index=True)
+    room_index: Optional[int] = None
 
 
 class Friendship(SQLModel, table=True):

@@ -1,5 +1,10 @@
-// Task Dungeon — Phaser client. It only renders and asks the API; every unlock,
-// XP grant, and loot roll is decided server-side (see src/app/game.py).
+// Task Dungeon — Phaser client. It only renders and asks the API. Every potion
+// award, every clear, and every HP change is decided server-side
+// (see src/app/game.py and src/app/routes/api.py).
+//
+// Balance numbers are NOT duplicated here. The server publishes them at
+// /api/config and they land in CFG, so changing a number in src/app/config.py
+// moves the whole game. The literals below are layout and pixel art only.
 
 const T = 32; // tile size in px
 const ROOM_W = 6; // tiles per room column, including one shared wall
@@ -7,20 +12,39 @@ const ENTRANCE = 4; // hallway tiles before the first room column
 const ROWS = 15;
 const HALL_ROW = 7; // middle row of the 3-tile hallway (rows 6-8)
 const FONT = '"Press Start 2P", monospace';
-const KIND_COLOR = { daily: "#7bd389", monthly: "#e5986b", goal: "#b28cf0" };
+const TIER_COLOR = { mob: "#7bd389", "mini-boss": "#e5986b", boss: "#b28cf0" };
+const POTION_COLOR = { heal: "#7bd389", damage: "#e56b6f", haste: "#f2c14e", shield: "#4ea8de" };
 
+let CFG = null; // balance numbers from /api/config, fetched in BootScene
+
+function potionShort(category) {
+  return CFG?.potion_effects?.[category]?.short ?? category;
+}
+
+// --- HUD (plain DOM above the canvas, not Phaser text) ---
 function updateHud(p) {
-  document.getElementById("hud-level").textContent = `Lv ${p.level}`;
   document.getElementById("hud-hp").textContent = `${p.hp}/${p.max_hp}`;
   document.getElementById("hp-fill").style.width = `${(100 * p.hp) / p.max_hp}%`;
-  const span = p.xp_next_level - p.xp_this_level;
-  document.getElementById("hud-xp").textContent = `${p.xp} (next ${p.xp_next_level})`;
-  document.getElementById("xp-fill").style.width = `${(100 * (p.xp - p.xp_this_level)) / span}%`;
   document.getElementById("hud-atk").textContent = p.atk;
   document.getElementById("hud-def").textContent = p.defense;
-  document.getElementById("hud-items").textContent = p.items.length
-    ? `Loot: ${p.items.map((i) => i.name).join(", ")}`
-    : "No loot yet";
+  document.getElementById("hud-depth").textContent = p.checkpoint + 1;
+
+  const box = document.getElementById("hud-items");
+  box.replaceChildren();
+  const held = CFG.potion_categories.filter((c) => (p.potions?.[c] || 0) > 0);
+  if (held.length === 0) {
+    box.append(el("span", { class: "muted" }, "No potions — finish a quest to restock"));
+    return;
+  }
+  for (const category of held) {
+    box.append(
+      el(
+        "span",
+        { class: "potion", style: `border-color:${POTION_COLOR[category]};color:${POTION_COLOR[category]}` },
+        `${potionShort(category)} ×${p.potions[category]}`,
+      ),
+    );
+  }
 }
 
 // --- Placeholder pixel art, generated at boot so no asset downloads are needed. ---
@@ -48,13 +72,7 @@ function makeTextures(scene) {
       for (let x = -offset; x < T; x += 16) g.fillRect(x + 1, row * 8 + 1, 14, 6);
     }
   });
-  texture(scene, "door_locked", T, T, (g) => {
-    g.fillStyle(0x6b4226).fillRect(0, 0, T, T);
-    g.fillStyle(0x4e2f1a).fillRect(7, 0, 2, T).fillRect(15, 0, 2, T).fillRect(23, 0, 2, T);
-    g.fillStyle(0xf2c14e).fillRect(12, 15, 8, 8);
-    g.lineStyle(2, 0xf2c14e).strokeCircle(16, 13, 3);
-  });
-  texture(scene, "door_open", T, T, (g) => {
+  texture(scene, "archway", T, T, (g) => {
     g.fillStyle(0x120d18).fillRect(0, 0, T, T);
     g.lineStyle(3, 0x6b4226).strokeRect(1.5, 1.5, T - 3, T - 3);
   });
@@ -104,16 +122,20 @@ class BootScene extends Phaser.Scene {
   }
 
   init(data) {
-    this.spawn = data?.spawn;
+    // A room index means "wake up here" (a checkpoint return); a point means a
+    // raw position (only the entry hallway uses that).
+    this.spawnRoom = data?.spawnRoom;
+    this.spawnPoint = data?.spawnPoint;
   }
 
   create() {
     if (!this.textures.exists("floor")) makeTextures(this);
     const loading = this.add.text(20, 20, "Loading dungeon...", { fontFamily: FONT, fontSize: "12px" });
-    Promise.all([api("/api/rooms"), api("/api/player")])
-      .then(([rooms, player]) => {
+    Promise.all([api("/api/rooms"), api("/api/player"), api("/api/config")])
+      .then(([rooms, player, config]) => {
+        CFG = config;
         updateHud(player);
-        this.scene.start("dungeon", { rooms, player, spawn: this.spawn });
+        this.scene.start("dungeon", { rooms, player, spawnRoom: this.spawnRoom, spawnPoint: this.spawnPoint });
       })
       .catch((err) => loading.setText(`Could not load the dungeon: ${err.message}`));
   }
@@ -127,7 +149,8 @@ class DungeonScene extends Phaser.Scene {
   init(data) {
     this.rooms = data.rooms;
     this.stats = data.player;
-    this.spawn = data.spawn;
+    this.spawnRoom = data.spawnRoom;
+    this.spawnPoint = data.spawnPoint;
   }
 
   create() {
@@ -149,19 +172,15 @@ class DungeonScene extends Phaser.Scene {
 
     this.hero = this.physics.add.sprite(0, 0, "hero").setDepth(10);
     this.hero.body.setSize(16, 12).setOffset(4, 16);
-    const start = this.spawn ?? { x: 2 * T, y: HALL_ROW * T + T / 2 };
+    // Room geometry is needed before buildRoom runs (a checkpoint return has to
+    // drop the hero inside that room), so it comes from this helper, not from
+    // the centre the rooms cache as they are drawn.
+    const room = this.spawnRoom !== undefined ? this.roomCenter(this.spawnRoom) : null;
+    const start = room ?? this.spawnPoint ?? { x: 2 * T, y: HALL_ROW * T + T / 2 };
     this.hero.setPosition(start.x, start.y);
     this.physics.add.collider(this.hero, this.walls);
 
-    this.rooms.forEach((room, i) => this.buildRoom(room, i));
-
-    if (this.rooms.length === 0) {
-      this.add
-        .text(ENTRANCE * T, HALL_ROW * T - 4, "Your dungeon is empty.\nAdd quests on the Quest Board!", {
-          fontFamily: FONT, fontSize: "10px", color: "#f2c14e", lineSpacing: 8,
-        })
-        .setOrigin(0, 0.5);
-    }
+    this.rooms.forEach((r, i) => this.buildRoom(r, i));
 
     const worldW = width * T;
     const worldH = ROWS * T;
@@ -188,6 +207,8 @@ class DungeonScene extends Phaser.Scene {
   }
 
   buildGrid(width, cols) {
+    // The layout comes from the server's room list, so every player walks the
+    // same weekly dungeon. Two rooms per column, top and bottom, off one hallway.
     const grid = Array.from({ length: ROWS }, () => Array(width).fill(" "));
     const box = (x0, y0, x1, y1, fill) => {
       for (let y = y0; y <= y1; y++) {
@@ -211,54 +232,63 @@ class DungeonScene extends Phaser.Scene {
     return grid;
   }
 
+  // Where room `i` sits on the map. Pure geometry, so it is available before
+  // anything is drawn and is the single source of truth for spawn points.
+  roomCenter(i) {
+    const top = i % 2 === 0;
+    return {
+      x: (ENTRANCE + ROOM_W * Math.floor(i / 2) + 3) * T + T / 2,
+      y: (top ? 3 : 12) * T + 8,
+    };
+  }
+
   buildRoom(room, i) {
     const col = Math.floor(i / 2);
     const top = i % 2 === 0;
+    const centerX = (ENTRANCE + ROOM_W * col + 3) * T + T / 2;
+    const centerY = (top ? 3 : 12) * T;
+    const enemyY = centerY + 8;
+    room.center = { x: centerX, y: enemyY };
+
+    // Open archway tile on the hallway wall — decorative only. There is no
+    // collider here and none is wanted: every room is enterable from the start.
     const doorX = (ENTRANCE + ROOM_W * col + 3) * T + T / 2;
     const doorY = (top ? 5 : 9) * T + T / 2;
-    const centerY = (top ? 3 : 12) * T;
-
-    // The wall tile where the door goes gets replaced by a door.
     this.walls.getChildren()
       .filter((w) => w.x === doorX && w.y === doorY)
       .forEach((w) => w.destroy());
-    if (room.unlocked) {
-      this.add.image(doorX, doorY, "door_open");
-    } else {
-      this.walls.create(doorX, doorY, "door_locked");
-    }
+    this.add.image(doorX, doorY, "archway");
 
     const labelY = (top ? 1 : 10) * T + 2;
     this.add
-      .text(doorX, labelY, room.title, {
-        fontFamily: FONT, fontSize: "8px", color: KIND_COLOR[room.kind], align: "center",
+      .text(centerX, labelY, room.name, {
+        fontFamily: FONT, fontSize: "8px", color: TIER_COLOR[room.enemy.tier], align: "center",
         wordWrap: { width: (ROOM_W - 1) * T - 8 },
       })
       .setOrigin(0.5, 0);
 
-    const enemyKey = `enemy_${room.enemy.tier}`;
     if (room.cleared) {
-      this.add.image(doorX, centerY + 8, "chest");
-      this.add.text(doorX, centerY + 26, "CLEARED", { fontFamily: FONT, fontSize: "8px", color: "#7bd389" })
+      this.add.image(centerX, enemyY, "chest");
+      this.add.text(centerX, centerY + 26, "CLEARED", { fontFamily: FONT, fontSize: "8px", color: "#7bd389" })
         .setOrigin(0.5, 0);
-    } else if (room.unlocked) {
-      const enemy = this.physics.add.staticImage(doorX, centerY + 8, enemyKey);
-      this.tweens.add({ targets: enemy, y: enemy.y - 4, duration: 600, yoyo: true, repeat: -1 });
-      this.physics.add.overlap(this.hero, enemy, () => this.startBattle(room, doorX, top));
     } else {
-      // Locked: show the monster as a dark silhouette waiting behind the door.
-      this.add.image(doorX, centerY + 8, enemyKey).setTint(0x000000).setAlpha(0.6);
+      const enemy = this.physics.add.staticImage(centerX, enemyY, `enemy_${room.enemy.tier}`);
+      this.tweens.add({ targets: enemy, y: enemy.y - 4, duration: 600, yoyo: true, repeat: -1 });
+      this.physics.add.overlap(this.hero, enemy, () => this.startBattle(room));
     }
 
-    room.door = { x: doorX, y: doorY, top };
+    if (room.index === this.stats.checkpoint && this.stats.checkpoint > 0) {
+      this.add.text(centerX, centerY + 40, "▲ CHECKPOINT", { fontFamily: FONT, fontSize: "7px", color: "#4ea8de" })
+        .setOrigin(0.5, 0);
+    }
   }
 
-  startBattle(room, doorX, top) {
+  startBattle(room) {
     if (this.inBattle) return;
     this.inBattle = true;
-    const spawn = { x: doorX, y: HALL_ROW * T + T / 2 + (top ? -T / 2 : T / 2) };
     this.cameras.main.flash(250, 255, 255, 255);
-    this.time.delayedCall(250, () => this.scene.start("battle", { room, player: this.stats, spawn }));
+    this.time.delayedCall(250, () =>
+      this.scene.start("battle", { room, player: this.stats, spawnRoom: room.index }));
   }
 
   update() {
@@ -270,13 +300,14 @@ class DungeonScene extends Phaser.Scene {
     this.hero.setVelocity((vx / len) * speed, (vy / len) * speed);
     if (vx) this.hero.setFlipX(vx < 0);
 
-    // Show a hint when standing next to a locked door.
+    // Standing near an undefended room describes what is waiting inside it.
     const near = this.rooms.find(
-      (r) => r.door && Phaser.Math.Distance.Between(this.hero.x, this.hero.y, r.door.x, r.door.y) < T * 1.6,
+      (r) => r.center && Phaser.Math.Distance.Between(this.hero.x, this.hero.y, r.center.x, r.center.y) < T * 1.8,
     );
     let hint = "";
-    if (near && !near.unlocked) hint = `LOCKED: complete "${near.title}" to open`;
-    else if (near && !near.cleared) hint = `A ${near.enemy.name} awaits! (+${near.xp} XP)`;
+    if (near && !near.cleared) {
+      hint = `${near.name} — a ${near.enemy.name} (${near.enemy.hp} HP, ${near.enemy.atk} ATK). Walk in to fight.`;
+    }
     this.hint.setText(hint).setVisible(Boolean(hint));
   }
 }
@@ -289,7 +320,10 @@ class BattleScene extends Phaser.Scene {
   init(data) {
     this.room = data.room;
     this.stats = data.player;
-    this.spawn = data.spawn;
+    this.spawnRoom = data.spawnRoom;
+    // Captured before the fight: a defeat has to send you back to where you
+    // started this attempt, not to a checkpoint this fight would have set.
+    this.entryCheckpoint = this.stats.checkpoint;
   }
 
   create() {
@@ -301,13 +335,16 @@ class BattleScene extends Phaser.Scene {
     this.defending = false;
     this.busy = false;
     this.over = false;
+    // True while a win/lose write is in flight, so SPACE cannot skip ahead of it.
+    this.settling = false;
+    this.buffs = { damage: 0, haste: 0, shield: 0 };
 
     this.add.rectangle(0, 0, width, height, 0x120d18).setOrigin(0);
     this.add.rectangle(0, height * 0.62, width, height * 0.38, 0x241c31).setOrigin(0);
     this.add.text(width / 2, 24, `${enemy.tier.toUpperCase()}: ${enemy.name}`, {
-      fontFamily: FONT, fontSize: "16px", color: KIND_COLOR[this.room.kind],
+      fontFamily: FONT, fontSize: "16px", color: TIER_COLOR[enemy.tier],
     }).setOrigin(0.5, 0);
-    this.add.text(width / 2, 52, `Quest: ${this.room.title}`, {
+    this.add.text(width / 2, 52, this.room.name, {
       fontFamily: FONT, fontSize: "9px", color: "#9d90b3",
     }).setOrigin(0.5, 0);
 
@@ -318,6 +355,9 @@ class BattleScene extends Phaser.Scene {
 
     this.heroBar = this.makeBar(width * 0.25, height * 0.62 - 28, this.stats.username);
     this.enemyBar = this.makeBar(width * 0.72, height * 0.62 - 28, enemy.name);
+    this.buffLine = this.add.text(width / 2, height * 0.62 - 44, "", {
+      fontFamily: FONT, fontSize: "8px", color: "#f2c14e",
+    }).setOrigin(0.5, 0);
     this.refreshBars();
 
     this.message = this.add.text(32, height * 0.62 + 18, "", {
@@ -340,9 +380,21 @@ class BattleScene extends Phaser.Scene {
     kb.on("keydown-THREE", () => this.choose("defend"));
     kb.on("keydown-ESC", () => this.choose("flee"));
     kb.on("keydown-SPACE", () => this.choose("continue"));
+    // Potion slots are keys 4..7 and are rebuilt as the inventory changes, so
+    // the handler looks the category up by position rather than capturing one.
+    kb.on("keydown", (event) => {
+      const K = Phaser.Input.Keyboard.KeyCodes;
+      const index = [K.FOUR, K.FIVE, K.SIX, K.SEVEN].indexOf(event.keyCode);
+      const category = this.heldPotions()[index];
+      if (category) this.choose(`potion:${category}`);
+    });
 
-    this.say(`A wild ${enemy.name} appears! It hits for about ${enemy.atk}.`);
-    this.refreshButtons();
+    this.say(`A wild ${enemy.name} blocks the way. It hits for about ${enemy.atk}.`);
+    this.refresh();
+  }
+
+  heldPotions() {
+    return CFG.potion_categories.filter((c) => (this.stats.potions?.[c] || 0) > 0);
   }
 
   makeBar(x, y, name) {
@@ -361,12 +413,39 @@ class BattleScene extends Phaser.Scene {
     };
     set(this.heroBar, this.heroHp, this.stats.max_hp);
     set(this.enemyBar, this.enemyHp, this.room.enemy.hp);
+    const active = Object.entries(this.buffs).filter(([, turns]) => turns > 0);
+    this.buffLine.setText(active.map(([k, t]) => `${potionShort(k)} ${t}`).join("  "));
   }
 
-  refreshButtons() {
+  // Rebuild the potion row from the current inventory. The server is the only
+  // thing that decides what is left; this just draws what it last told us.
+  renderPotions() {
+    if (this.potionRow) this.potionRow.destroy();
+    this.potionRow = this.add.container(32, this.scale.height - 112);
+    const held = this.heldPotions();
+    if (!held.length) {
+      this.potionRow.add(this.add.text(0, 0, "No potions — finish a quest on the Quest Board to restock", {
+        fontFamily: FONT, fontSize: "9px", color: "#9d90b3",
+      }));
+      return;
+    }
+    held.forEach((category, i) => {
+      const btn = this.add.text(i * 160, 0, `${i + 4} ${potionShort(category)} ×${this.stats.potions[category]}`, {
+        fontFamily: FONT, fontSize: "9px", color: "#1a1424",
+        backgroundColor: POTION_COLOR[category], padding: { x: 8, y: 7 },
+      }).setInteractive({ useHandCursor: true });
+      btn.on("pointerdown", () => this.choose(`potion:${category}`));
+      this.potionRow.add(btn);
+    });
+  }
+
+  refresh() {
     this.buttons[1].setText(this.powerCooldown ? `2 Power (${this.powerCooldown})` : "2 Power Strike");
     this.buttons[1].setAlpha(this.powerCooldown ? 0.5 : 1);
     this.menu.setVisible(!this.over);
+    this.renderPotions();
+    if (this.potionRow) this.potionRow.setVisible(!this.over);
+    this.refreshBars();
   }
 
   say(text) {
@@ -385,43 +464,114 @@ class BattleScene extends Phaser.Scene {
     this.time.delayedCall(250, () => target.clearTint());
   }
 
+  roll() {
+    const [low, high] = CFG.damage_variance;
+    return Phaser.Math.FloatBetween(low, high);
+  }
+
+  // One attack. Returns the damage dealt so the caller can narrate it.
+  strike(power) {
+    const crit = Math.random() < CFG.crit_chance;
+    const rage = this.buffs.damage > 0 ? CFG.potion_effects.damage.mult : 1;
+    const dmg = Math.max(
+      CFG.min_damage,
+      Math.round(
+        this.stats.atk * this.roll() * (power ? CFG.power_mult : 1) * rage * (crit ? CFG.crit_mult : 1),
+      ),
+    );
+    this.enemyHp -= dmg;
+    this.hitEffect(this.enemySprite);
+    this.floatText(this.enemySprite.x, this.enemySprite.y - 60, `-${dmg}`, crit ? "#f2c14e" : "#ffffff");
+    return { dmg, crit };
+  }
+
+  tickBuffs() {
+    // One player action = one turn of each active buff.
+    for (const key of Object.keys(this.buffs)) {
+      if (this.buffs[key] > 0) this.buffs[key]--;
+    }
+  }
+
   choose(action) {
     if (action === "continue") return this.finish();
     if (action === "flee" && (!this.busy || this.over)) return this.leave();
     if (this.busy || this.over) return;
+    if (action.startsWith("potion:")) return this.drink(action.slice("potion:".length));
     if (action === "power" && this.powerCooldown) return this.say("Power Strike is still recharging!");
 
     this.busy = true;
     if (this.powerCooldown) this.powerCooldown--;
-    const roll = () => Phaser.Math.FloatBetween(0.8, 1.2);
     let text;
     if (action === "attack" || action === "power") {
-      const crit = Math.random() < 0.12;
-      let dmg = Math.round(this.stats.atk * roll() * (action === "power" ? 2.2 : 1) * (crit ? 1.5 : 1));
-      if (action === "power") this.powerCooldown = 3;
-      this.enemyHp -= dmg;
-      this.hitEffect(this.enemySprite);
-      this.floatText(this.enemySprite.x, this.enemySprite.y - 60, `-${dmg}`, crit ? "#f2c14e" : "#ffffff");
-      text = `${action === "power" ? "POWER STRIKE! " : ""}${crit ? "Critical hit! " : ""}You deal ${dmg} damage.`;
+      const power = action === "power";
+      if (power) this.powerCooldown = CFG.power_cooldown;
+      const first = this.strike(power);
+      let extra = "";
+      if (this.buffs.haste > 0) {
+        extra = ` Haste strikes again for ${this.strike(power).dmg}!`;
+      }
+      text = `${power ? "POWER STRIKE! " : ""}${first.crit ? "Critical hit! " : ""}You deal ${first.dmg} damage.${extra}`;
     } else {
       this.defending = true;
-      const heal = Math.min(6, this.stats.max_hp - this.heroHp);
+      const heal = Math.min(CFG.defend_heal, this.stats.max_hp - this.heroHp);
       this.heroHp += heal;
       if (heal) this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `+${heal}`, "#7bd389");
       text = `You raise your shield${heal ? ` and recover ${heal} HP` : ""}.`;
     }
+    this.tickBuffs();
     this.say(text);
-    this.refreshBars();
-    this.refreshButtons();
+    this.refresh();
 
     if (this.enemyHp <= 0) return this.time.delayedCall(500, () => this.win());
     this.time.delayedCall(700, () => this.enemyTurn());
   }
 
+  // Drinking takes a turn, so a potion is a real choice and not a free heal.
+  async drink(category) {
+    this.busy = true;
+    const effect = CFG.potion_effects[category];
+    try {
+      const result = await api(`/api/potions/${category}/use`, {
+        method: "POST",
+        body: { room_index: this.room.index },
+      });
+      this.stats.potions = result.potions;
+      let text = `You drink ${effect.label}.`;
+      if (category === "heal") {
+        const healed = Math.min(effect.heal, this.stats.max_hp - this.heroHp);
+        this.heroHp += healed;
+        text = healed
+          ? `You drink ${effect.label} and recover ${healed} HP.`
+          : `You drink ${effect.label}, but you are already at full health.`;
+        if (healed) this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `+${healed}`, POTION_COLOR.heal);
+      } else {
+        this.buffs[category] = effect.turns;
+        const detail = {
+          damage: `Attacks hit ${effect.mult}× harder`,
+          haste: "You strike twice each turn",
+          shield: `Incoming damage is cut ${Math.round((1 - effect.reduction) * 100)}%`,
+        }[category];
+        text += ` ${detail} for ${effect.turns} turns.`;
+      }
+      this.tickBuffs();
+      this.say(text);
+      updateHud({ ...this.stats, hp: Math.max(0, this.heroHp) });
+      this.refresh();
+      this.time.delayedCall(700, () => this.enemyTurn());
+    } catch (err) {
+      // The server rejected the spend — most likely a double-click raced the
+      // first request. Say so and hand the turn back without punishing.
+      this.say(err.message);
+      this.refresh();
+      this.busy = false;
+    }
+  }
+
   enemyTurn() {
     const enemy = this.room.enemy;
-    let dmg = Math.max(1, Math.round(enemy.atk * Phaser.Math.FloatBetween(0.8, 1.2)) - this.stats.defense);
-    if (this.defending) dmg = Math.ceil(dmg * 0.3);
+    let dmg = Math.max(CFG.min_damage, Math.round(enemy.atk * this.roll()) - this.stats.defense);
+    if (this.defending) dmg = Math.ceil(dmg * CFG.defend_reduction);
+    if (this.buffs.shield > 0) dmg = Math.ceil(dmg * CFG.potion_effects.shield.reduction);
     this.defending = false;
     this.heroHp -= dmg;
     this.tweens.add({ targets: this.enemySprite, x: this.enemySprite.x - 40, duration: 120, yoyo: true });
@@ -429,49 +579,74 @@ class BattleScene extends Phaser.Scene {
     this.cameras.main.shake(150, 0.006);
     this.floatText(this.heroSprite.x, this.heroSprite.y - 70, `-${dmg}`, "#e56b6f");
     this.say(`${enemy.name} attacks for ${dmg} damage!`);
-    this.refreshBars();
+    this.refresh();
     if (this.heroHp <= 0) return this.lose();
     this.busy = false;
   }
 
   async win() {
     this.over = true;
-    this.refreshButtons();
+    this.result = "won";
+    this.settling = true;
+    this.refresh();
     this.tweens.killTweensOf(this.enemySprite);
     this.tweens.add({ targets: this.enemySprite, alpha: 0, scale: 0, angle: 180, duration: 600 });
     this.add.particles(this.enemySprite.x, this.enemySprite.y, "spark", {
       speed: { min: 80, max: 260 }, lifespan: 700, quantity: 40, tint: [0xf2c14e, 0xffffff, 0xe56b6f], emitting: false,
     }).explode(40);
-    this.say("Victory! Claiming your reward...");
+    this.say("Victory! Claiming the room...");
     try {
-      const result = await api(`/api/rooms/${this.room.task_id}/clear`, { method: "POST" });
-      updateHud(result.player);
-      const loot = result.loot ? `\nLoot: ${result.loot.name} (+${result.loot.atk} ATK, +${result.loot.defense} DEF)` : "";
-      const levelUp = result.player.level > this.stats.level ? `\nLEVEL UP! You are now level ${result.player.level}!` : "";
-      this.say(`Victory! +${result.xp} XP${levelUp}${loot}\n\nPress SPACE to return.`);
-      this.floatText(this.scale.width / 2, this.scale.height * 0.3, `+${result.xp} XP`, "#f2c14e");
+      // HP rides along with the clear: the server derives the next fight's HP
+      // from this row, so there is no separate mutable value to drift.
+      const result = await api(`/api/rooms/${this.room.index}/clear`, {
+        method: "POST",
+        body: { hp: this.heroHp },
+      });
+      this.stats = result.player;
+      updateHud(this.stats);
+      this.say(`Victory! ${this.room.name} is yours.\nRoom ${result.player.checkpoint + 1} cleared this week.\n\nPress SPACE to continue.`);
+      this.floatText(this.scale.width / 2, this.scale.height * 0.3, `ROOM ${result.player.checkpoint + 1}`, "#f2c14e");
     } catch (err) {
-      this.say(`Victory... but the reward was refused: ${err.message}\n\nPress SPACE to return.`);
+      this.say(`Victory... but the clear was refused: ${err.message}\n\nPress SPACE to continue.`);
     }
-    this.result = "won";
+    this.settling = false;
   }
 
-  lose() {
+  // Defeat costs the potions you drank and the room you were standing in, and
+  // nothing else. You wake at the checkpoint with full health.
+  async lose() {
     this.over = true;
     this.result = "lost";
-    this.refreshButtons();
+    this.settling = true;
+    this.refresh();
     this.tweens.add({ targets: this.heroSprite, alpha: 0.3, angle: -90, duration: 500 });
-    this.say("You were defeated... No penalty: rest up and try again.\n\nPress SPACE to retry, ESC to leave.");
+    const checkpoint = this.entryCheckpoint;
+    let restored = true;
+    try {
+      // Restores full HP on the checkpoint row. A 404 just means the player has
+      // never cleared anything this week, so there is nothing to restore — HP
+      // is already full in that case.
+      await api(`/api/rooms/${checkpoint}/hp`, { method: "POST", body: { hp: this.stats.max_hp } });
+    } catch {
+      restored = false;
+    }
+    const where = checkpoint > 0 ? `Room ${checkpoint + 1}` : "the entrance hall";
+    const tail = restored ? ", fully healed" : "";
+    this.say(`You fall.\n\nYou wake at ${where}${tail}. The potions you drank are spent.\n\nPress SPACE to continue.`);
+    this.settling = false;
+  }
+
+  // Fleeing is free and costs nothing but the fight: you come back to the room
+  // you walked into, still holding every potion.
+  leave() {
+    this.scene.start("boot", { spawnRoom: this.spawnRoom });
   }
 
   finish() {
-    if (!this.over || !this.result) return;
-    if (this.result === "lost") return this.scene.restart();
-    this.leave();
-  }
-
-  leave() {
-    this.scene.start("boot", { spawn: this.spawn });
+    // Wait for the win/lose write to land, or the next scene loads stale HP.
+    if (!this.over || !this.result || this.settling) return;
+    if (this.result === "lost") return this.scene.start("boot", { spawnRoom: this.entryCheckpoint });
+    this.scene.start("boot", { spawnRoom: this.room.index });
   }
 }
 

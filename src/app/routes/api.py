@@ -1,14 +1,11 @@
-import random
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from .. import game
+from .. import categorize, config, game
 from ..auth import current_user
 from ..db import get_session
-from ..models import Completion, Friendship, Item, RoomClear, Task, User, utcnow
+from ..models import BattleClear, Completion, Friendship, PotionUse, Task, User, utcnow
 
 router = APIRouter(prefix="/api")
 
@@ -26,6 +23,18 @@ class FriendIn(BaseModel):
     username: str
 
 
+class UseIn(BaseModel):
+    room_index: int | None = None
+
+
+class ClearIn(BaseModel):
+    hp: int
+
+
+class HpIn(BaseModel):
+    hp: int
+
+
 def friend_ids(session: Session, user: User) -> set[int]:
     rows = session.exec(select(Friendship).where(Friendship.user_id == user.id)).all()
     return {f.friend_id for f in rows}
@@ -38,22 +47,65 @@ def own_task(session: Session, user: User, task_id: int) -> Task:
     return task
 
 
+def user_tasks(session: Session, user_id: int) -> dict[int, Task]:
+    rows = session.exec(select(Task).where(Task.user_id == user_id, Task.active == True)).all()  # noqa: E712
+    return {t.id: t for t in rows}
+
+
+def current_hp(session: Session, user: User, start) -> int:
+    """HP carried into the next fight.
+
+    Derived from the checkpoint room's clear row rather than stored on the user,
+    so there is still no mutable HP field to edit. A fresh week starts full.
+
+    The checkpoint is the furthest room cleared, not the most recently cleared:
+    they differ once you backtrack, and "how far in did I get" is the thing the
+    HP is attached to. A defeat rewrites that row back to full via
+    POST /api/rooms/{checkpoint}/hp, which is what restores you.
+    """
+    last = session.exec(
+        select(BattleClear)
+        .where(BattleClear.user_id == user.id, BattleClear.week_start == start)
+        .order_by(BattleClear.room_index.desc())
+    ).first()
+    if last is None:
+        return config.PLAYER_BASE["max_hp"]
+    return max(1, min(config.PLAYER_BASE["max_hp"], last.hp_after))
+
+
+def checkpoint_index(session: Session, user: User, start) -> int:
+    """The furthest room cleared this week — where a defeat sends you back."""
+    rows = session.exec(
+        select(BattleClear.room_index).where(
+            BattleClear.user_id == user.id, BattleClear.week_start == start
+        )
+    ).all()
+    return max(rows) if rows else 0
+
+
+def potion_inventory(session: Session, user: User, start) -> dict[str, int]:
+    tasks = user_tasks(session, user.id)
+    completions = session.exec(
+        select(Completion).where(Completion.user_id == user.id, Completion.completed_at >= start)
+    ).all()
+    uses = session.exec(
+        select(PotionUse).where(PotionUse.user_id == user.id, PotionUse.used_at >= start)
+    ).all()
+    return game.inventory(completions, tasks, uses, start)
+
+
 def player_stats(session: Session, user: User) -> dict:
-    clears = session.exec(select(RoomClear).where(RoomClear.user_id == user.id)).all()
-    items = session.exec(select(Item).where(Item.user_id == user.id)).all()
-    xp = sum(c.xp for c in clears)
-    level = game.level_for(xp)
+    start = game.week_start(utcnow())
+    inventory = potion_inventory(session, user, start)
     return {
         "username": user.username,
-        "xp": xp,
-        "level": level,
-        "xp_this_level": game.xp_for_level(level),
-        "xp_next_level": game.xp_for_level(level + 1),
-        "hp": game.MAX_HP,
-        "max_hp": game.MAX_HP,
-        "atk": 10 + 3 * level + sum(i.atk for i in items),
-        "defense": sum(i.defense for i in items),
-        "items": [{"name": i.name, "atk": i.atk, "defense": i.defense} for i in items],
+        "max_hp": config.PLAYER_BASE["max_hp"],
+        "hp": current_hp(session, user, start),
+        "atk": config.PLAYER_BASE["atk"],
+        "defense": config.PLAYER_BASE["defense"],
+        "potions": inventory,
+        "potions_total": sum(inventory.values()),
+        "checkpoint": checkpoint_index(session, user, start),
     }
 
 
@@ -62,30 +114,65 @@ def get_player(user: User = Depends(current_user), session: Session = Depends(ge
     return player_stats(session, user)
 
 
+@router.get("/config")
+def get_config(user: User = Depends(current_user)):
+    """The public balance numbers, so the client renders with the same values the
+    server enforces instead of keeping its own copies. Credentials are not
+    exposed here — only the rules a player can legitimately see.
+    """
+    return {
+        "player": config.PLAYER_BASE,
+        "potions_by_kind": config.POTIONS_BY_KIND,
+        "potion_effects": config.POTION_EFFECTS,
+        "potion_categories": list(config.POTION_CATEGORIES),
+        "kind_labels": config.KIND_LABEL,
+        "damage_variance": list(config.DAMAGE_VARIANCE),
+        "crit_chance": config.CRIT_CHANCE,
+        "crit_mult": config.CRIT_MULT,
+        "power_mult": config.POWER_MULT,
+        "power_cooldown": config.POWER_COOLDOWN,
+        "defend_heal": config.DEFEND_HEAL,
+        "defend_reduction": config.DEFEND_REDUCTION,
+        "min_damage": config.MIN_DAMAGE,
+    }
+
+
 @router.get("/rooms")
 def get_rooms(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    now = utcnow()
-    tasks = session.exec(select(Task).where(Task.user_id == user.id, Task.active == True)).all()  # noqa: E712
-    completions = session.exec(select(Completion).where(Completion.user_id == user.id)).all()
-    cleared_ids = {c.completion_id for c in session.exec(select(RoomClear).where(RoomClear.user_id == user.id))}
-    rooms = []
-    for task in sorted(tasks, key=lambda t: (game.KINDS.index(t.kind), t.id)):
-        done = game.completion_in_period(task, completions, now)
-        rooms.append({
-            "task_id": task.id,
-            "title": task.title,
-            "kind": task.kind,
-            "unlocked": done is not None,
-            "cleared": done is not None and done.id in cleared_ids,
-            "enemy": game.enemy_for(task),
-            "xp": game.XP_BY_KIND[task.kind],
-        })
+    """The shared dungeon for this week. Identical for every player; only the
+    cleared flags differ."""
+    start = game.week_start(utcnow())
+    cleared = {r.room_index for r in session.exec(
+        select(BattleClear).where(BattleClear.user_id == user.id, BattleClear.week_start == start)
+    ).all()}
+    rooms = game.rooms_for_week(start)
+    for room in rooms:
+        room["cleared"] = room["index"] in cleared
     return rooms
 
 
 @router.get("/tasks")
 def list_tasks(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    return session.exec(select(Task).where(Task.user_id == user.id, Task.active == True)).all()  # noqa: E712
+    """Active quests with what each one is worth and whether it is already
+    banked for its period. The potion category is read off the cached
+    categorization, so this endpoint never calls the classifier."""
+    now = utcnow()
+    tasks = session.exec(select(Task).where(Task.user_id == user.id, Task.active == True)).all()  # noqa: E712
+    completions = session.exec(select(Completion).where(Completion.user_id == user.id)).all()
+    by_task: dict[int, list[Completion]] = {}
+    for completion in completions:
+        by_task.setdefault(completion.task_id, []).append(completion)
+    return [
+        {
+            "id": t.id,
+            "title": t.title,
+            "kind": t.kind,
+            "potion": t.potion_category or config.DEFAULT_CATEGORY,
+            "potions": config.POTIONS_BY_KIND.get(t.kind, 0),
+            "done": game.completion_in_period(t, by_task.get(t.id, []), now) is not None,
+        }
+        for t in tasks
+    ]
 
 
 @router.post("/tasks")
@@ -93,7 +180,10 @@ def create_task(body: TaskIn, user: User = Depends(current_user), session: Sessi
     title = body.title.strip()
     if body.kind not in game.KINDS or not title:
         raise HTTPException(400, "Task needs a title and kind daily/monthly/goal")
-    task = Task(user_id=user.id, title=title[:120], kind=body.kind)
+    title = title[:120]
+    # Categorized once here, never in the gameplay path.
+    task = Task(user_id=user.id, title=title, kind=body.kind,
+                potion_category=categorize.category_for(title, body.kind))
     session.add(task)
     session.commit()
     session.refresh(task)
@@ -122,30 +212,70 @@ def complete_task(task_id: int, body: CompleteIn, user: User = Depends(current_u
     session.add(completion)
     session.commit()
     session.refresh(completion)
-    return completion
-
-
-@router.post("/rooms/{task_id}/clear")
-def clear_room(task_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
-    task = own_task(session, user, task_id)
-    completions = session.exec(select(Completion).where(Completion.task_id == task.id)).all()
-    done = game.completion_in_period(task, completions, utcnow())
-    if done is None:
-        raise HTTPException(403, "Room is locked: complete the real task first")
-    if session.exec(select(RoomClear).where(RoomClear.completion_id == done.id)).first():
-        raise HTTPException(409, "Room already cleared this period")
-    xp = game.XP_BY_KIND[task.kind]
-    session.add(RoomClear(task_id=task.id, user_id=user.id, completion_id=done.id, xp=xp))
-    loot = game.roll_loot(random.Random())
-    if loot:
-        name, atk, defense = loot
-        session.add(Item(user_id=user.id, name=name, atk=atk, defense=defense))
-    session.commit()
+    category = task.potion_category or config.DEFAULT_CATEGORY
     return {
-        "xp": xp,
-        "loot": {"name": loot[0], "atk": loot[1], "defense": loot[2]} if loot else None,
-        "player": player_stats(session, user),
+        "completion": completion,
+        "potions_earned": game.potions_earned_for(completion, task),
+        "category": category,
+        "potions": potion_inventory(session, user, game.week_start(now)),
     }
+
+
+@router.post("/rooms/{room_index}/clear")
+def clear_room(room_index: int, body: ClearIn, user: User = Depends(current_user),
+               session: Session = Depends(get_session)):
+    """Record a win. The room must exist on this week's map."""
+    start = game.week_start(utcnow())
+    rooms = game.rooms_for_week(start)
+    if not 0 <= room_index < len(rooms):
+        raise HTTPException(404, "No such room")
+    if session.exec(
+        select(BattleClear).where(
+            BattleClear.user_id == user.id,
+            BattleClear.week_start == start,
+            BattleClear.room_index == room_index,
+        )
+    ).first():
+        raise HTTPException(409, "Room already cleared this week")
+    hp = max(1, min(config.PLAYER_BASE["max_hp"], body.hp))
+    session.add(BattleClear(user_id=user.id, week_start=start, room_index=room_index, hp_after=hp))
+    session.commit()
+    return {"cleared": rooms[room_index]["index"], "player": player_stats(session, user)}
+
+
+@router.post("/rooms/{room_index}/hp")
+def report_hp(room_index: int, body: HpIn, user: User = Depends(current_user),
+              session: Session = Depends(get_session)):
+    """Carry HP out of a fight, written onto that room's clear row."""
+    start = game.week_start(utcnow())
+    clear = session.exec(
+        select(BattleClear).where(
+            BattleClear.user_id == user.id,
+            BattleClear.week_start == start,
+            BattleClear.room_index == room_index,
+        )
+    ).first()
+    if clear is None:
+        raise HTTPException(404, "Clear that room first")
+    clear.hp_after = max(1, min(config.PLAYER_BASE["max_hp"], body.hp))
+    session.add(clear)
+    session.commit()
+    return {"ok": True}
+
+
+@router.post("/potions/{category}/use")
+def use_potion(category: str, body: UseIn, user: User = Depends(current_user),
+               session: Session = Depends(get_session)):
+    """Spend one potion. Availability is derived, never sent by the client."""
+    if category not in config.POTION_CATEGORIES:
+        raise HTTPException(404, "No such potion")
+    start = game.week_start(utcnow())
+    if potion_inventory(session, user, start).get(category, 0) < 1:
+        raise HTTPException(409, "You have none of those left this week")
+    session.add(PotionUse(user_id=user.id, category=category, used_at=utcnow(),
+                          room_index=body.room_index))
+    session.commit()
+    return {"ok": True, "potions": potion_inventory(session, user, start)}
 
 
 @router.get("/log")
@@ -162,7 +292,8 @@ def get_log(username: str | None = None, user: User = Depends(current_user),
     ).all()
     return [
         {"id": c.id, "task": t.title, "kind": t.kind, "completed_at": c.completed_at.isoformat() + "Z",
-         "note": c.note, "flagged": c.flagged_by is not None}
+         "note": c.note, "flagged": c.flagged_by is not None,
+         "potion": t.potion_category or config.DEFAULT_CATEGORY}
         for c, t in rows
     ]
 
@@ -193,15 +324,15 @@ def add_friend(body: FriendIn, user: User = Depends(current_user), session: Sess
 
 @router.get("/leaderboard")
 def leaderboard(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    week_ago = utcnow() - timedelta(days=7)
+    """Furthest room cleared this week. Everyone plays the same map, so this is
+    directly comparable — and it is still a sum over rows, not a stored number."""
+    start = game.week_start(utcnow())
     board = []
     for uid in friend_ids(session, user) | {user.id}:
         u = session.get(User, uid)
-        clears = session.exec(select(RoomClear).where(RoomClear.user_id == uid)).all()
         board.append({
             "username": u.username,
-            "weekly_xp": sum(c.xp for c in clears if c.cleared_at >= week_ago),
-            "level": game.level_for(sum(c.xp for c in clears)),
+            "furthest_room": checkpoint_index(session, u, start),
             "is_you": uid == user.id,
         })
-    return sorted(board, key=lambda r: r["weekly_xp"], reverse=True)
+    return sorted(board, key=lambda r: (r["furthest_room"], r["username"]), reverse=True)

@@ -3,6 +3,11 @@ services:
     name: task-dungeon
     runtime: python
     plan: free
+    # The registered .tech domain. Render will not go live on it until the DNS
+    # records it lists are created at the registrar — see README "Deploy".
+    domains:
+      - mylost.tech
+      - www.mylost.tech
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
