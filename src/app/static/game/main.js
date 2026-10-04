@@ -27,7 +27,7 @@ function updateHud(p) {
   document.getElementById("hp-fill").style.width = `${(100 * p.hp) / p.max_hp}%`;
   document.getElementById("hud-atk").textContent = p.atk;
   document.getElementById("hud-def").textContent = p.defense;
-  document.getElementById("hud-depth").textContent = p.checkpoint + 1;
+  document.getElementById("hud-depth").textContent = p.furthest_room + 1;
   if (CFG) document.getElementById("hud-rooms").textContent = CFG.room_count;
 
   const box = document.getElementById("hud-items");
@@ -123,8 +123,7 @@ class BootScene extends Phaser.Scene {
   }
 
   init(data) {
-    // A room index means "wake up here" (a checkpoint return); a point means a
-    // raw position (only the entry hallway uses that).
+    // Room returns follow victories or shrine use; fleeing returns to the hall.
     this.spawnRoom = data?.spawnRoom;
     this.spawnPoint = data?.spawnPoint;
   }
@@ -176,9 +175,7 @@ class DungeonScene extends Phaser.Scene {
 
     this.hero = this.physics.add.sprite(0, 0, "hero").setDepth(10);
     this.hero.body.setSize(16, 12).setOffset(4, 16);
-    // Room geometry is needed before buildRoom runs (a checkpoint return has to
-    // drop the hero inside that room), so it comes from this helper, not from
-    // the centre the rooms cache as they are drawn.
+    // Resolve return positions before rooms and their overlap triggers are drawn.
     const room = this.spawnRoom !== undefined ? this.roomCenter(this.spawnRoom) : null;
     const start = room ?? this.spawnPoint ?? { x: 2 * T, y: HALL_ROW * T + T / 2 };
     this.hero.setPosition(start.x, start.y);
@@ -208,6 +205,7 @@ class DungeonScene extends Phaser.Scene {
 
     this.keys = this.input.keyboard.addKeys("W,A,S,D,UP,DOWN,LEFT,RIGHT");
     this.inBattle = false;
+    this.busy = false;
   }
 
   buildGrid(width, cols) {
@@ -309,10 +307,6 @@ class DungeonScene extends Phaser.Scene {
       this.physics.add.overlap(this.hero, enemy, () => this.startBattle(room));
     }
 
-    if (room.index === this.stats.checkpoint && this.stats.checkpoint > 0) {
-      this.add.text(centerX, centerY + 40, "▲ CHECKPOINT", { fontFamily: FONT, fontSize: "7px", color: "#4ea8de" })
-        .setOrigin(0.5, 0);
-    }
   }
 
   // Resting is a server action like any other. The client does not decide that
@@ -341,7 +335,10 @@ class DungeonScene extends Phaser.Scene {
     this.inBattle = true;
     this.cameras.main.flash(250, 255, 255, 255);
     this.time.delayedCall(250, () =>
-      this.scene.start("battle", { room, player: this.stats, spawnRoom: room.index }));
+      this.scene.start("battle", {
+        room, player: this.stats,
+        retreatPoint: { x: room.center.x, y: HALL_ROW * T + T / 2 },
+      }));
   }
 
   update() {
@@ -377,10 +374,7 @@ class BattleScene extends Phaser.Scene {
   init(data) {
     this.room = data.room;
     this.stats = data.player;
-    this.spawnRoom = data.spawnRoom;
-    // Captured before the fight: a defeat has to send you back to where you
-    // started this attempt, not to a checkpoint this fight would have set.
-    this.entryCheckpoint = this.stats.checkpoint;
+    this.retreatPoint = data.retreatPoint;
   }
 
   create() {
@@ -655,33 +649,30 @@ class BattleScene extends Phaser.Scene {
     this.add.particles(this.enemySprite.x, this.enemySprite.y, "spark", {
       speed: { min: 80, max: 260 }, lifespan: 700, quantity: 40, tint: [0xf2c14e, 0xffffff, 0xe56b6f], emitting: false,
     }).explode(40);
-    const checkpoint = this.stats.checkpoint;
-    this.say(`Victory! ${this.room.name} is yours.\nRoom ${checkpoint + 1} cleared this week.\n\nPress SPACE to continue.`);
-    this.floatText(this.scale.width / 2, this.scale.height * 0.3, `ROOM ${checkpoint + 1}`, "#f2c14e");
+    const roomNumber = this.room.index + 1;
+    this.say(`Victory! ${this.room.name} is yours.\nRoom ${roomNumber} cleared.\n\nPress SPACE to continue.`);
+    this.floatText(this.scale.width / 2, this.scale.height * 0.3, `ROOM ${roomNumber}`, "#f2c14e");
     this.settling = false;
   }
 
-  // A loss is also already recorded by `act`: the potions drunk this fight are
-  // spent and the checkpoint row has been rewritten to full, which is what
-  // "you wake up healed" means. The client only narrates it.
+  // The server has already reset the run and kept the quest history.
   lose() {
     this.over = true;
     this.result = "lost";
     this.settling = true;
     this.refresh();
     this.tweens.add({ targets: this.heroSprite, alpha: 0.3, angle: -90, duration: 500 });
-    const checkpoint = this.entryCheckpoint;
-    const where = checkpoint > 0 ? `Room ${checkpoint + 1}` : "the entrance hall";
-    this.say(`You fall.\n\nYou wake at ${where}, fully healed. The potions you drank are spent.\n\nPress SPACE to continue.`);
+    this.say("You fall. Your dungeon progress and potions reset.\nYou wake in the entrance hall, fully healed.\nYour quests and task history are kept.\n\nPress SPACE to continue.");
     this.settling = false;
   }
 
   finish() {
     // Wait for the win/lose write to land, or the next scene loads stale HP.
     if (!this.over || !this.result || this.settling) return;
-    if (this.result === "lost") return this.scene.start("boot", { spawnRoom: this.entryCheckpoint });
-    if (this.result === "error") return this.scene.start("boot", { spawnRoom: this.spawnRoom });
-    if (this.result === "fled") return this.scene.start("boot", { spawnRoom: this.spawnRoom });
+    if (this.result === "lost") return this.scene.start("boot", {});
+    if (this.result === "error" || this.result === "fled") {
+      return this.scene.start("boot", { spawnPoint: this.retreatPoint });
+    }
     this.scene.start("boot", { spawnRoom: this.room.index });
   }
 }

@@ -83,5 +83,5 @@ floor = c.get("/api/rooms").json()
 combat = [x for x in floor["rooms"] if not x["safe"]]
 boss = next(x for x in floor["rooms"] if x["kind"] == "boss")
 print(f"\ncleared {len(cleared)}/{len(combat)} combat rooms")
-print(f"checkpoint: {c.get('/api/player').json()['checkpoint']}")
+print(f"furthest room: {c.get('/api/player').json()['furthest_room']}")
 print("RESULT: " + ("BOSS DEFEATED" if boss["index"] in cleared else "BOSS NOT REACHED"))

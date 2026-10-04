@@ -73,7 +73,7 @@ class BattleClear(SQLModel, table=True):
 
 
 class PotionUse(SQLModel, table=True):
-    """Append-only record of a potion consumed. Inventory is earned minus used,
+    """Append-only record of a potion consumed or lost on death. Inventory is earned minus used,
     so nothing here is ever updated or deleted."""
 
     id: Optional[int] = Field(default=None, primary_key=True)

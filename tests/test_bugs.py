@@ -15,9 +15,12 @@ os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp()}/bugs.db"
 os.environ["SECRET_KEY"] = "x"
 
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlmodel import Session, select  # noqa: E402
 
-from src.app.db import init_db  # noqa: E402
+from src.app import config, game  # noqa: E402
+from src.app.db import engine, init_db  # noqa: E402
 from src.app.main import app  # noqa: E402
+from src.app.models import BattleClear, User, utcnow  # noqa: E402
 
 init_db()
 c = TestClient(app, raise_server_exceptions=False)
@@ -35,34 +38,20 @@ def login(name: str) -> None:
                            "action": "register"})
 
 
-def fight_to_end(index: int):
-    r = c.post(f"/api/rooms/{index}/enter")
-    if r.status_code != 200:
-        return None
-    f = r.json()["fight"]
-    for _ in range(400):
-        if f["state"] != "fight":
-            return f
-        x = c.post(f"/api/rooms/{index}/act",
-                   json={"action": "power" if f["power_cd"] == 0 else "attack"})
-        if x.status_code != 200:
-            return None
-        f = x.json()["fight"]
-    return f
-
-
 def clear_everything() -> None:
-    """Beat the whole floor so every room, including the shrine, is reachable."""
-    for _ in range(4):
-        progressed = False
-        for r in c.get("/api/rooms").json()["rooms"]:
-            if r["safe"] or r["cleared"]:
-                continue
-            f = fight_to_end(r["index"])
-            if f and f["state"] == "won":
-                progressed = True
-        if not progressed:
-            return
+    """Seed a completed route to test the shrine independently of combat luck.
+
+    Repeated fights no longer accumulate progress across deaths.
+    """
+    username = c.get("/api/player").json()["username"]
+    rooms = c.get("/api/rooms").json()["rooms"]
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.username == username)).one()
+        for room in rooms:
+            if not room["safe"]:
+                session.add(BattleClear(user_id=user.id, week_start=game.week_start(utcnow()),
+                                        room_index=room["index"], hp_after=config.PLAYER_BASE["max_hp"]))
+        session.commit()
 
 
 print("\n=== 1. Using the shrine twice must not 500 ===")

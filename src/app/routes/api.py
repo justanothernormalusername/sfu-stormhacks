@@ -59,16 +59,7 @@ def user_tasks(session: Session, user_id: int) -> dict[int, Task]:
 
 
 def current_hp(session: Session, user: User, start) -> int:
-    """HP carried into the next fight.
-
-    Derived from the checkpoint room's clear row rather than stored on the user,
-    so there is still no mutable HP field to edit. A fresh week starts full.
-
-    The checkpoint is the furthest room cleared, not the most recently cleared:
-    they differ once you backtrack, and "how far in did I get" is the thing the
-    HP is attached to. A defeat rewrites that row back to full, which is what
-    restores you.
-    """
+    """HP carried from the furthest clear; a fresh run starts at full health."""
     last = session.exec(
         select(BattleClear)
         .where(BattleClear.user_id == user.id, BattleClear.week_start == start)
@@ -79,16 +70,8 @@ def current_hp(session: Session, user: User, start) -> int:
     return max(1, min(config.PLAYER_BASE["max_hp"], last.hp_after))
 
 
-def checkpoint_index(session: Session, user: User, start) -> int:
-    """The furthest room fought this week — where a defeat sends you back.
-
-    Safe rooms are excluded, and that exclusion is load-bearing rather than
-    cosmetic. The shrine is recorded in the same table as a clear, because there
-    is no second table for "I already used this" — so without this filter,
-    walking into the shrine would set the checkpoint to its room number and, worse,
-    put a player who has fought nothing at all near the top of the leaderboard.
-    Progress has to mean rooms fought.
-    """
+def furthest_room_index(session: Session, user: User, start) -> int:
+    """Run depth for the HUD and leaderboard, excluding safe rooms."""
     floor = game.floor_for_week(start)
     rows = session.exec(
         select(BattleClear.room_index).where(
@@ -136,7 +119,7 @@ def player_stats(session: Session, user: User) -> dict:
         "defense": config.PLAYER_BASE["defense"],
         "potions": inventory,
         "potions_total": sum(inventory.values()),
-        "checkpoint": checkpoint_index(session, user, start),
+        "furthest_room": furthest_room_index(session, user, start),
     }
 
 
@@ -199,7 +182,7 @@ def get_rooms(user: User = Depends(current_user), session: Session = Depends(get
         # lets you fight, and the player could never clear the first fight.
         room["blocked"] = room["index"] not in enterable
         # `walkable` is kept separately because the map draws a cleared room as
-        # somewhere you can stand, and the checkpoint spawn needs the geometry.
+        # somewhere you can stand.
         room["walkable"] = room["index"] in walkable
     return floor
 
@@ -323,6 +306,12 @@ def complete_task(task_id: int, body: CompleteIn, user: User = Depends(current_u
 @router.post("/rooms/{room_index}/enter")
 def enter_room(room_index: int, user: User = Depends(current_user),
                session: Session = Depends(get_session)) -> dict:
+    start = game.week_start(utcnow())
+    with fight_lock(user, room_index, start):
+        return _enter_room(room_index, user, session, start)
+
+
+def _enter_room(room_index: int, user: User, session: Session, start) -> dict:
     """Start a fight in a room, or use a safe room's effect.
 
     The client sends nothing but a room index. Enemy stats, the player's HP, and
@@ -330,7 +319,6 @@ def enter_room(room_index: int, user: User = Depends(current_user),
     browser resolved the fight and then told the server how much HP it had left,
     so a player could post an arbitrary `hp` and take the boss for free.
     """
-    start = game.week_start(utcnow())
     floor = game.floor_for_week(start)
     if not 0 <= room_index < len(floor["rooms"]):
         raise HTTPException(404, "No such room")
@@ -348,9 +336,7 @@ def enter_room(room_index: int, user: User = Depends(current_user),
     if room["safe"]:
         restored = 0
         if room.get("restore"):
-            # Restoring is recorded as a clear of the shrine. That reuses the one
-            # append-only row type the floor already has, so "have I used the
-            # shrine this week" stays a question the database answers.
+            # A clear records shrine use until death or the weekly reset.
             session.add(BattleClear(user_id=user.id, week_start=start,
                                     room_index=room_index,
                                     hp_after=config.PLAYER_BASE["max_hp"]))
@@ -360,13 +346,10 @@ def enter_room(room_index: int, user: User = Depends(current_user),
                 "player": player_stats(session, user)}
 
     seed = f"{user.id}|{start.isoformat()}|{room_index}|{uuid4().hex}"
-    # Under the same lock as `act`, so two simultaneous enters cannot both mint a
-    # fight: the second would otherwise overwrite the first, and the player would
-    # have taken a turn against a state they never saw.
-    with fight_lock(user, room_index, start):
-        state = game.new_fight(room, hero_stats(session, user, start),
-                               potion_inventory(session, user, start), seed)
-        record_fight_start(session, user, state, start)
+    # Entry and actions share a lock so a new fight cannot race a run reset.
+    state = game.new_fight(room, hero_stats(session, user, start),
+                           potion_inventory(session, user, start), seed)
+    record_fight_start(session, user, state, start)
     return {"room": room, "safe": False, "fight": public_fight(state),
             "player": player_stats(session, user)}
 
@@ -460,36 +443,22 @@ def act(room_index: int, body: ActIn, user: User = Depends(current_user),
 # insert and a defeat would need cleanup. Keeping them in memory means a restart
 # simply drops an unfinished fight — the player walks back in, full HP, nothing
 # lost — which is exactly the right failure mode for something that never
-# mattered. Clears and potion uses remain append-only rows in the database.
+# mattered. Defeat deletes this run's clears; potion uses remain in the database.
 #
 # The seed is per-fight random, so two players in the same room get different
 # fights, and a player cannot replay a sequence of lucky rolls.
 
 _FIGHTS: dict[tuple[int, int, str], dict] = {}
 _FIGHT_LOCK = Lock()
-# One lock per fight, not one global lock. A single mutex would serialise every
-# player's turns against each other; keying it by fight means two players — or one
-# player in two different rooms — never wait on each other, while any single fight
-# is still strictly serialised.
-_FIGHT_LOCKS: dict[tuple[int, int, str], Lock] = {}
+# One lock per player's week so a death cannot race another room's action or
+# entry and restore progress from the run that just ended.
+_FIGHT_LOCKS: dict[tuple[int, str], Lock] = {}
 
 
 @contextmanager
 def fight_lock(user: User, room_index: int, start):
-    """Serialise all mutation of one in-progress fight.
-
-    FastAPI serves each request in a thread, so without this two overlapping
-    requests could both read turn N and both write turn N+1 — silently discarding
-    one of them, and in the potion case writing two `PotionUse` rows for a single
-    drink. Keyed per (user, room, week) so unrelated fights never contend.
-
-    Locks are created under the global lock and never evicted. That is bounded by
-    players × rooms for the current week, which is trivial at this scale, and an
-    unbounded-growth bug would be worse than a small leak. They do reset when the
-    process restarts, and stale weeks are harmless — they are just never taken
-    again once the fight is gone.
-    """
-    key = _fight_key(user, room_index, start)
+    """Serialise combat and run resets for this player across all rooms."""
+    key = (user.id, start.isoformat())
     with _FIGHT_LOCK:
         lock = _FIGHT_LOCKS.setdefault(key, Lock())
     with lock:
@@ -562,27 +531,25 @@ def record_fight_win(session: Session, user: User, state: dict, start) -> dict:
 
 
 def record_fight_loss(session: Session, user: User, state: dict, start) -> dict:
-    """Persist a defeat: the potions drunk are gone, and you wake at your last
-    cleared room at full health. Nothing else is taken."""
-    checkpoint = checkpoint_index(session, user, start)
-    restored = 0
-    if checkpoint is not None:
-        # Rewriting the checkpoint row back to full is what "you wake up healed"
-        # means. It is the furthest *cleared* room, not this one, so backing out
-        # of a failed fight does not cost progress.
-        clear = session.exec(
-            select(BattleClear).where(
-                BattleClear.user_id == user.id,
-                BattleClear.week_start == start,
-                BattleClear.room_index == checkpoint,
-            )
-        ).first()
-        if clear is not None:
-            clear.hp_after = config.PLAYER_BASE["max_hp"]
-            session.add(clear)
-            session.commit()
-            restored = clear.hp_after
-    return {"checkpoint": checkpoint, "restored_to": restored, "cleared": False}
+    """Reset dungeon progress and inventory, preserving quests and completions."""
+    # Record the remaining pack as lost so old task completions cannot refill it.
+    now = utcnow()
+    for category, amount in potion_inventory(session, user, start).items():
+        for _ in range(amount):
+            session.add(PotionUse(user_id=user.id, category=category, used_at=now,
+                                  room_index=state["room_index"]))
+    clears = session.exec(select(BattleClear).where(
+        BattleClear.user_id == user.id, BattleClear.week_start == start
+    )).all()
+    for clear in clears:
+        session.delete(clear)
+    session.commit()
+    with _FIGHT_LOCK:
+        for key in list(_FIGHTS):
+            if key[0] == user.id:
+                del _FIGHTS[key]
+    return {"restored_to": config.PLAYER_BASE["max_hp"], "cleared": False,
+            "reset": True}
 
 
 @router.get("/log")
@@ -639,7 +606,7 @@ def leaderboard(user: User = Depends(current_user), session: Session = Depends(g
         u = session.get(User, uid)
         board.append({
             "username": u.username,
-            "furthest_room": checkpoint_index(session, u, start),
+            "furthest_room": furthest_room_index(session, u, start),
             "is_you": uid == user.id,
         })
     return sorted(board, key=lambda r: (r["furthest_room"], r["username"]), reverse=True)

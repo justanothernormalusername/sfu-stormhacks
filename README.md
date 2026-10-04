@@ -10,13 +10,13 @@ Your to-do list is a dungeon — but in v2 the list no longer _is_ the map. Ever
   - **How much effort it is** — a continuous score on a five-rung scale
 - **The count is never asked for.** The effort score is mapped onto a bounded range in `config.py` (`POTION_MIN`–`POTION_MAX`, currently 1–4). So no quest title, however worded, can buy a reward outside that range — writing "the hardest task imaginable" gets you the same ceiling as genuinely doing it. Retune those two numbers and every existing quest re-scales, because quests store the score rather than the count.
 - **If Jev is unreachable**, the keyword rules pick the potion, the quest repeats daily, and it pays the floor. Failing low is deliberate: an outage must never be worth exploiting.
-- **Depth** is the score. Furthest room cleared this week, on the leaderboard, next to your party. Health carries between fights; a defeat costs you the potions you drank and sends you back to your last cleared room, fully healed. Nothing else.
+- **Depth** is the score. Furthest room cleared in your current run, on the leaderboard, next to your party. Health carries between fights. Death resets cleared rooms, shrines, active fights, and all potions, then returns you to the entrance hall fully healed. Quests and their completion history stay intact. Fleeing returns you to the central hallway outside the room and keeps your run progress.
 
 Every completion is timestamped by the server in a log your party can see and flag, so nobody can fake their way up.
 
 ## Nothing is a counter
 
-There is no XP column, no level column, no potion-count column, and no "HP" field on the user. Depth is the furthest `BattleClear` row; your pack is completions minus potion-uses; your HP is the `hp_after` on your furthest cleared room. Every one of those is a sum or a max over append-only rows.
+There is no XP column, no level column, no potion-count column, and no "HP" field on the user. Depth is the furthest `BattleClear` row; your pack is completions minus potion-uses; your HP is the `hp_after` on your furthest cleared room. Death removes the current run's clears and records remaining potions as lost without deleting task completions.
 
 This is not just tidiness. It means the client cannot cheat by editing a number it was handed — the server recomputes from rows and simply disagrees. It is the strongest technical claim in the project, and it is enforced by the database rather than by application checks.
 
@@ -43,14 +43,14 @@ The client sends an action name and renders what comes back. It never computes d
 | `POST /api/rooms/{i}/enter` | Opens a fight. Enemy stats, your HP, and the fight seed are all decided server-side. |
 | `POST /api/rooms/{i}/act` | One player action plus the enemy turn, resolved by `game.fight_step`. |
 
-The seed never leaves the server, so a player cannot compute the fight locally and skip the turns they would have lost. Fights are held in memory keyed by `(user, room, week)` and mutated under a per-fight lock, so two concurrent requests cannot double-spend a potion or skip a turn.
+The seed never leaves the server, so a player cannot compute the fight locally and skip the turns they would have lost. Fights are held in memory keyed by `(user, room, week)` and mutated under a lock for each player's week, so concurrent requests cannot double-spend a potion or restore another room's fight after death.
 
-Wins, defeats, and potion spends are written as append-only rows as they happen — not when a client says the fight ended.
+Wins, defeats, and potion spends are persisted as they happen — not when a client says the fight ended.
 
 ## Tests and balance tooling
 
 ```bash
-./run_tests.sh                                    # the four suites that gate a change
+./run_tests.sh                                 # API suites and scene checks (Node.js)
 PYTHONPATH=. .venv/bin/python tests/floor_run.py # play a whole floor through the API
 PYTHONPATH=. .venv/bin/python -m tools.balance   # Monte-Carlo clear rates by potion budget
 ```
