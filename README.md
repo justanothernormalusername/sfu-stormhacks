@@ -78,8 +78,24 @@ There are no migrations — tables are created on startup. Changing the schema m
 | `DATABASE_URL`       | no                    | Defaults to `sqlite:///./dungeon.db`.                                                                          |
 | `APP_TZ`             | no                    | Defaults to `America/Vancouver`. Day and week boundaries follow it.                                            |
 | `CLASSIFIER_API_KEY` | no                    | Enables Jev. Without it, quests pay the minimum via keyword rules alone.                                       |
+| `BOSS_HP_CAP`        | no                    | Ceiling on the boss's HP. A number clamps it; `none` removes the ceiling and lets the depth curve decide. Defaults to `138`. |
 
 For local work, put these in a `.env` file at the repo root — it is gitignored, and `config.py` reads it as a fallback for the environment. On Render there is no file, so set them as real environment variables.
+
+### Every balance number lives in one file
+
+`src/app/config.py` is the only place a tuning number is written down. It is grouped into `--- SECTION ---` banners with an index in the module docstring, so Ctrl-F on a name (or reading the index) gets you to the knob. Nothing is duplicated in the backend or the client: the server publishes the public half at `/api/config` and the client renders with those values.
+
+The boss's HP has two knobs, and they are not interchangeable:
+
+| Want | Change |
+| ---- | ------ |
+| Harder boss, longer fight | `BOSS_HP_CAP` (or `ROOM_ARCHETYPES["boss"]["hp_mult"]` **only if the cap is not binding**) |
+| Harder boss, hits harder | `ROOM_ARCHETYPES["boss"]["atk_mult"]`, `BOSS["special_mult"]`, `BOSS["phase_mult"]` |
+
+`BOSS_HP_CAP` is a *ceiling* on the depth curve, not a replacement for it. The curve currently produces ~194 HP for the boss, so `hp_mult` changes have no visible effect while the cap is 138 — that is the single most confusing thing about tuning this fight. Unbounded is a supported mode (`BOSS_HP_CAP=none`), and `/api/config` publishes the current value as `boss_hp_cap` (`null` when unbounded) so the client can tell the difference.
+
+After changing anything in the `PLAYER`, `POTION`, `ENEMY`, `ROOM_ARCHETYPES`, `COMBAT` or `BOSS` sections, run `PYTHONPATH=. .venv/bin/python -m tools.balance` — it Monte-Carlos the floor and fails if the clear rates leave the design target.
 
 ### Run a single worker
 

@@ -139,6 +139,9 @@ def get_config(user: User = Depends(current_user)):
         # Derived from the authored floor rather than a separate constant, so
         # the number the HUD shows cannot drift from the map that was built.
         "room_count": len(config.FLOOR_ROOMS),
+        # null means "unbounded" — the depth curve decides the boss's HP outright.
+        # Published so the client can tell a deliberately uncapped boss from a bug.
+        "boss_hp_cap": config.BOSS_HP_CAP,
         "potion_min": config.POTION_MIN,
         "potion_max": config.POTION_MAX,
         "potion_effects": config.POTION_EFFECTS,

@@ -132,16 +132,23 @@ def _enemies_for_room(seed: random.Random, arch: dict, depth: int,
                * arch["hp_mult"] * modifier["hp_mult"])
     atk = round((config.ENEMY_ATK["base"] + config.ENEMY_ATK["per_depth"] * depth)
                 * arch["atk_mult"] * modifier["atk_mult"])
-    # An archetype may cap its HP. This is what keeps a long fight from becoming
-    # an unlosable-by-skill one: past a certain length, every turn the enemy acts
-    # is more damage than the player can regenerate in the same time, and the
-    # only "solution" is a potion — which means the potions stop being a choice
-    # and become the answer. See ROOM_ARCHETYPES["boss"]["hp_cap"].
+    # An archetype may cap its HP, and the cap is optional: `None` (or a missing
+    # key) means unbounded, so the depth curve above decides outright. That is
+    # what BOSS_HP_CAP=none does. Tested against `is not None` rather than
+    # truthiness so a cap of 0 behaves as written instead of vanishing.
+    #
+    # The cap exists to stop a fight becoming unlosable-by-skill: past a certain
+    # length, every turn the enemy acts is more damage than the player can
+    # regenerate in the same time, and the only "solution" is a potion — which
+    # means the potions stop being a choice and become the answer. See
+    # config.BOSS_HP_CAP.
     cap = arch.get("hp_cap")
+    if cap is not None:
+        hp = min(hp, cap)
     return {
         "name": seed.choice(config.ENEMY_NAMES[arch["tier"]]),
         "tier": arch["tier"],
-        "hp": max(1, min(hp, cap) if cap else hp),
+        "hp": max(1, hp),
         "atk": max(1, atk),
         "depth": depth,
     }

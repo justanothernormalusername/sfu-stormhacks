@@ -20,6 +20,15 @@ LO, HI = 120, 165
 TARGET = (0.55, 0.85)
 
 base_cap = config.ROOM_ARCHETYPES["boss"]["hp_cap"]
+if base_cap is None:
+    # The sweep below assigns concrete numbers, so it is measuring a capped boss
+    # even when the live game is unbounded. Say so rather than letting the
+    # restored value quietly mean something different from what is deployed.
+    print("note: BOSS_HP_CAP is currently unbounded; this sweep is measuring "
+          "capped values only.")
+elif base_cap != config.DEFAULT_BOSS_HP_CAP:
+    print(f"note: BOSS_HP_CAP is overridden to {base_cap} "
+          f"(default {config.DEFAULT_BOSS_HP_CAP}); sweeping anyway.")
 
 
 def boss_at(hp_cap: int) -> dict:

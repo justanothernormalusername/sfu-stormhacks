@@ -121,6 +121,46 @@ check("fight keys differ across weeks",
       api_mod._fight_key(user_stub, 1, datetime(2026, 10, 5))
       != api_mod._fight_key(user_stub, 1, datetime(2026, 10, 12)))
 
+print("\n=== 7. Every config.* the /api/config endpoint publishes exists ===")
+# This endpoint is built by reading attributes off the config module by name, so
+# nothing about it fails at import time — a constant that is deleted 500s at
+# runtime instead, and only on the one URL the Phaser client fetches during boot.
+# `Promise.all` in BootScene.create then rejects and /play never leaves
+# "Loading dungeon...", which looks like a broken server rather than a bad number.
+# Nothing else here calls /api/config, so this is the check that catches it.
+login("cfg")
+r = c.get("/api/config")
+check("/api/config is not a 500", r.status_code == 200, f"got {r.status_code} {r.text[:140]}")
+if r.status_code == 200:
+    cfg = r.json()
+    # Every key the client reads at boot, so a rename breaks here rather than
+    # silently rendering `undefined` into the HUD.
+    for key in ("room_count", "potion_categories", "potion_effects",
+                "player", "potion_min", "potion_max", "kind_labels",
+                "boss_hp_cap"):
+        check(f"/api/config publishes {key!r}", key in cfg)
+    # The HUD prints this as "Room n / room_count", so it has to equal the number
+    # of rooms actually on the floor — that is the whole reason it is derived.
+    floor_rooms = len(c.get("/api/rooms").json()["rooms"])
+    check("room_count matches the floor", cfg["room_count"] == floor_rooms,
+          f"config says {cfg['room_count']}, floor has {floor_rooms}")
+    check("potion_categories are all described by potion_effects",
+          set(cfg["potion_categories"]) <= set(cfg["potion_effects"]))
+
+print("\n=== 8. The boss HP ceiling is honoured, and can be unbounded ===")
+# BOSS_HP_CAP is a ceiling on the depth curve. Two ways it can go wrong without
+# any test noticing: a cap above the curve's result is silently a no-op (so
+# tuning hp_mult looks broken), and an unbounded cap has to actually mean unbounded
+# rather than falling back to some hidden default.
+boss_room = next(r for r in floor["rooms"] if r["kind"] == "boss")
+cap = cfg["boss_hp_cap"]
+if cap is None:
+    check("unbounded boss HP is the curve's own value", boss_room["enemy"]["hp"] > 0,
+          f"got {boss_room['enemy']['hp']}")
+else:
+    check("boss HP never exceeds the ceiling", boss_room["enemy"]["hp"] <= cap,
+          f"enemy {boss_room['enemy']['hp']} > cap {cap}")
+
 print("\n" + "=" * 60)
 if failures:
     print(f"FAILED: {failures}")

@@ -1,16 +1,42 @@
 """Every balance number in the game, in one place.
 
+This file is the single source of truth. Nothing below is duplicated as a literal
+anywhere else in the backend or the client: the server publishes the public half
+verbatim at `/api/config` and the client renders with exactly those values, so
+changing a number here moves the whole game.
+
 The owner is not balancing these alone — teammates are picking this up — so
-nothing below should be duplicated as a literal anywhere else in the backend or
-the client. Change a number here and the whole game moves with it.
+everything is grouped into `--- SECTION ---` banners and the index below lists the
+knobs people actually reach for. Find a number with Ctrl-F on its name, or start
+here:
 
-The public half of this file is served verbatim at `/api/config`, so the client
-renders with exactly the numbers the server enforces.
+    Boss tougher ............ BOSS_HP_CAP, ROOM_ARCHETYPES["boss"], BOSS
+    Every enemy tougher ..... ENEMY_HP, ENEMY_ATK
+    Player stronger ......... PLAYER_BASE
+    Potions worth more ...... POTION_MIN, POTION_MAX, POTION_EFFECTS
+    Longer/shorter floor .... FLOOR_ROOMS (and FLOOR_LINKS)
+    Floor pacing ............ ROOM_CLEAR_HEAL, MAX_DAMAGE, DAMAGE_VARIANCE
+    Weekly reset ............ WEEK_START_DAY
+    This week's weather ..... WEEKLY_MODIFIERS
 
-`tools/balance.py` reads this file and Monte-Carlo simulates full floor runs
-under several potion budgets. **Run it after touching anything in the
-`PLAYER_`, `POTION_`, `ENEMY_`, or `ROOM_ARCHETYPES` blocks** — the design target
-is written down at the bottom of that file and the numbers below are tuned to it.
+One setting can also be changed without editing this file at all — see
+ENVIRONMENT OVERRIDES below.
+
+`tools/balance.py` plays the real floor with the real rules and Monte-Carlos the
+clear rates against the design target written down at the bottom of that file.
+**Run it after touching anything in the PLAYER, POTION, ENEMY, ROOM_ARCHETYPES,
+COMBAT or BOSS sections.** The numbers here are tuned against it, not guessed.
+
+ENVIRONMENT OVERRIDES
+---------------------
+`BOSS_HP_CAP` is read from the environment, falling back to a local `.env` next to
+README.md, so the boss's HP ceiling can be set per-deploy without a code change:
+
+    BOSS_HP_CAP=250 .venv/bin/python -m uvicorn src.app.main:app
+    BOSS_HP_CAP=none .venv/bin/python -m uvicorn src.app.main:app
+
+`none` (or `unbounded`, `off`) removes the ceiling entirely and lets the depth
+curve decide. See `_read_number` and the BOSS_HP_CAP definition for the details.
 """
 
 import os
@@ -43,6 +69,50 @@ def _read_env(name: str, default: str | None = None) -> str | None:
     return default
 
 
+def _read_number(name: str) -> float | None:
+    """A number from the environment or .env, or None when it is off.
+
+    None covers three distinct states that all mean "do not override": the
+    variable is absent, it is blank, or it is spelled `none` / `unbounded` /
+    `off`. The last one matters — "no ceiling" is a real setting for the boss HP,
+    and it has to be expressible as a value rather than as the absence of one.
+
+    Anything else that is not a number raises. A typo in a tuning knob must not
+    silently leave the default in place, because that is how a balance change
+    gets lost and then blamed on the wrong line.
+    """
+    raw = _read_env(name)
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip().lower()
+    if text in ("none", "unbounded", "off", "no", "false"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        raise ValueError(
+            f"{name}={raw!r} is not a number. Use a number, or "
+            f"none/unbounded to switch the setting off."
+        ) from None
+
+
+def _boss_hp_cap() -> int | None:
+    """Resolve BOSS_HP_CAP into a number, or None for unbounded.
+
+    This is separate from `_read_number` because "the variable is not set" and "the
+    variable is set to none" have to mean different things here: the first keeps the
+    tuned default, the second removes the ceiling. `_read_number` returns None for
+    both, so asking it alone made `BOSS_HP_CAP=none` a silent no-op — the setting
+    looked broken in exactly the way this is meant to fix.
+
+    A non-positive number is treated as "off" rather than as a 1 HP boss.
+    """
+    if _read_env("BOSS_HP_CAP") is None:
+        return DEFAULT_BOSS_HP_CAP
+    value = _read_number("BOSS_HP_CAP")  # raises on a typo; None for none/unbounded/off
+    return int(value) if value and value > 0 else None
+
+
 def _classifier_key() -> str | None:
     """The classifier key, or None if the classifier is switched off.
 
@@ -58,11 +128,11 @@ def _classifier_key() -> str | None:
     return _read_env("KEY")
 
 
-# --- Periods -------------------------------------------------------------
+# --- Periods ----------------------------------------------------------------
 # Day, month, and week boundaries all follow the player's local clock.
 WEEK_START_DAY = 0  # 0=Monday .. 6=Sunday
 
-# --- The floor ------------------------------------------------------------
+# --- The floor --------------------------------------------------------------
 # The map is *authored* here rather than generated, because a good dungeon is a
 # designed sequence of beats — an opening, a fork, somewhere to breathe, a
 # locked-feeling finale — and not twelve rooms in a row. Coordinates are in
@@ -96,6 +166,16 @@ FLOOR_ROOMS = (
     ("The Root Chamber", "boss", 37, 6, 6, 10, 10),
 )
 
+# How many rooms the floor has is *not* a constant here: it is derived from
+# FLOOR_ROOMS by whoever needs it. A separate literal used to live in this file
+# (`ROOM_COUNT = 12`) and was deleted when the floor stopped being generated and
+# started being authored — but `/api/config` kept publishing it, and deleting the
+# constant took the endpoint down with it: a 500 on a URL the Phaser client
+# fetches during boot, which fails the whole `Promise.all` in BootScene.create
+# and leaves /play stuck on "Loading dungeon...". It used to look like a broken
+# server rather than a missing number. Deriving it means the two can never
+# disagree, so do not reintroduce a literal: use len(config.FLOOR_ROOMS).
+
 # Corridors, as room-index pairs. L-shaped and carved through room walls, so
 # connectivity is guaranteed by construction and asserted in tests/test_floor.py.
 FLOOR_LINKS = (
@@ -107,6 +187,38 @@ FLOOR_LINKS = (
     (9, 10), (8, 10),
     (9, 11), (10, 11),                # two ways into the boss arena
 )
+
+# --- Boss HP ceiling -------------------------------------------------------
+# The ceiling on the boss's HP, applied to the depth curve in
+# `game._enemies_for_room`:
+#
+#     boss HP = min(round((ENEMY_HP.base + ENEMY_HP.per_depth * depth)
+#                         * ROOM_ARCHETYPES["boss"]["hp_mult"]
+#                         * weekly_modifier["hp_mult"]), BOSS_HP_CAP)
+#
+# Two ways to set it:
+#
+#   * edit DEFAULT_BOSS_HP_CAP below, for a change committed with the game;
+#   * set BOSS_HP_CAP in the environment or a local .env, for a change you do
+#     NOT want committed — on Render there is no .env, so it is a real env var:
+#
+#         BOSS_HP_CAP=250 .venv/bin/python -m uvicorn src.app.main:app
+#         BOSS_HP_CAP=none .venv/bin/python -m uvicorn src.app.main:app
+#
+# `none` (or `unbounded`, `off`) means NO ceiling: the curve decides outright and
+# the boss at depth 10 lands on ~194 under this week's modifier. A number below
+# the curve's result clamps it; a number above it does nothing at all, which is
+# the trap that made this look broken when tuning `hp_mult` — check the number the
+# curve produces before assuming a cap is doing anything.
+#
+# Why a ceiling exists at all: past a certain length, every turn the boss acts
+# deals more damage than the player can regenerate in the same time, so the only
+# answer is a potion — the potions stop being a choice and become the answer.
+# 138 was measured rather than guessed: tools/tune_boss.py sweeps this value and
+# reports boss win rates, and 138 sits in the 55-85% band at a three-potion budget.
+# Re-run it rather than picking a number by feel.
+DEFAULT_BOSS_HP_CAP: int | None = 138
+BOSS_HP_CAP: int | None = _boss_hp_cap()
 
 # What each kind of room *is*, mechanically. `hp_mult` / `atk_mult` scale the
 # depth curve below, so a boss at depth 10 is not merely a bigger mob.
@@ -164,30 +276,21 @@ ROOM_ARCHETYPES = {
     },
     "boss": {
         "tier": "boss", "safe": False, "hp_mult": 2.35, "atk_mult": 1.38,
-        # The boss's HP is capped here rather than left to the curve, because the
-        # depth curve alone made it a ~13-turn fight that dealt more damage than
-        # one full health bar. That is only winnable by healing, which meant a
-        # player who never drank could not win it *at any potion budget* — the
-        # potion economy was doing the only work. Bounding it keeps the fight
-        # long enough to be a boss and short enough that raw skill plus a couple
-        # of potions is a legitimate path.
+        # The ceiling lives in BOSS_HP_CAP above rather than here, so that it can
+        # be overridden per-deploy from the environment without editing a dict
+        # literal nested three levels down.
         #
-        # Raised 132 -> 141. At 132 the boss died in 98.3% of runs at three
+        # 132 -> 141 -> 138. At 132 the boss died in 98.3% of runs at three
         # potions (target 55-85%): the fight the whole floor points at was a
-        # formality, which is the complaint this is fixing.
-        #
-        # Chosen by sweeping the cap and measuring (tune_boss.py), then confirmed
-        # against the full report. At 141 the boss wins 50.0% of three-potion runs
-        # (target 55-85%) — up from 98.3% before any of this — and the whole
-        # floor moved with it: 4 potions went 99.2% -> 55.8%, 7 potions 100% ->
-        # 83.3%. 138 is the measured sweet spot from the same sweep: the rate is
-        # steep around here (82.8% at 135, 68.5% at 138, 61.8% at 141), so this
-        # buys the last few points of target without spending much margin.
-        "hp_cap": 138,
+        # formality. 141 overshot to 61.8%, so 138 was picked from the same sweep
+        # (82.8% at 135, 68.5% at 138, 61.8% at 141) as the steepest part of the
+        # curve that still clears the target band.
+        "hp_cap": BOSS_HP_CAP,
         "blurb": "The thing the whole building was built around.",
     },
 }
 
+# --- Enemy difficulty curve -------------------------------------------------
 # Depth curve. HP and ATK are linear in `depth`, then scaled by the archetype.
 #
 # `per_depth` is deliberately gentle. A steep curve front-loads difficulty into
@@ -212,6 +315,7 @@ ROOM_ARCHETYPES = {
 ENEMY_HP = {"base": 24.0, "per_depth": 4.8}
 ENEMY_ATK = {"base": 4.1, "per_depth": 0.52}
 
+# --- Weekly modifier (one per week, identical for every player) -------------
 # One week's weather. Seeded from the week, identical for every player, so the
 # leaderboard stays comparable. `weight` is the relative chance of drawing it.
 WEEKLY_MODIFIERS = (
@@ -227,6 +331,7 @@ WEEKLY_MODIFIERS = (
      "blurb": "The machines are dormant. Take the gift while it lasts."},
 )
 
+# --- Creature names (drawn per week) ---------------------------------------
 # Creature pools, drawn per week. Bosses get a title on top of their name.
 ENEMY_NAMES = {
     "mob": ["Slime", "Goblin", "Skeleton", "Crawler", "Ghoul", "Imp", "Wisp", "Rust Hound"],
@@ -238,6 +343,7 @@ ENEMY_NAMES = {
 BOSS_TITLES = ["Keeper of the Last Archive", "Prime Process",
                "The Thing Beneath The Stack", "Sovereign of the Root"]
 
+# --- Room flavour (drawn per week) -------------------------------------------
 # One line of room atmosphere, drawn per week so a room you already know still
 # reads differently after a reset.
 ROOM_FLAVOR = {
@@ -268,7 +374,7 @@ ROOM_FLAVOR = {
     ],
 }
 
-# --- Player --------------------------------------------------------------
+# --- Player -----------------------------------------------------------------
 # Flat base stats. There are no levels; potions are the only variable layer.
 # `max_hp` is deliberately a whole week of incoming damage's worth of slack:
 # tools/balance.py asserts the floor's expected damage lands inside the
@@ -279,7 +385,7 @@ PLAYER_BASE = {
     "defense": 3,
 }
 
-# --- Potions -------------------------------------------------------------
+# --- Potions ----------------------------------------------------------------
 # How many potions one completion can pay, and the bounds of that range. The
 # player never chooses a number: the classifier scores how much effort the task
 # actually is, and the score is mapped onto MIN..MAX here. Change these two and
@@ -357,7 +463,7 @@ EFFORT_SCALE = [
 # it cannot be reached. See POTION_FALLBACK for why the effort one fails low.
 DEFAULT_KIND = "daily"
 
-# --- Combat --------------------------------------------------------------
+# --- Combat -----------------------------------------------------------------
 # One damage formula for everything: roll a flat variance band, apply the
 # multipliers, floor at MIN_DAMAGE. There is no armour that grows without bound
 # and no attacker stat that outruns the curve, so nothing trivialises a fight
@@ -404,7 +510,7 @@ ROOM_CLEAR_HEAL = 12
 # whole floor is built around. The boss's HP is set above this on purpose.
 MAX_DAMAGE = 45
 
-# --- Boss behaviour -------------------------------------------------------
+# --- Boss behaviour ---------------------------------------------------------
 # A boss should not be "the same fight, but more HP". Three things make it feel
 # like a different encounter, all resolved server-side by game.fight_step:
 #
@@ -441,7 +547,7 @@ MINI_BOSS = {
     "turn_limit": 25,
 }
 
-# --- Classifier (optional) ------------------------------------------------
+# --- Classifier (optional) --------------------------------------------------
 # The categorizer falls back to keywords when these are unset or the call
 # fails. Never let this take down task creation.
 #
