@@ -14,6 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp()}/race.db"
 os.environ["SECRET_KEY"] = "x"
+# Empty means "classifier off": keeps this run hermetic. Without it a
+# developer .env key would make a live call per quest and the reward
+# would depend on what the model decided today.
+os.environ["CLASSIFIER_API_KEY"] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
 

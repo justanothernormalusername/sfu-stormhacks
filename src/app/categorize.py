@@ -73,18 +73,31 @@ def _from_keywords(text: str) -> str:
     return config.DEFAULT_CATEGORY
 
 
-def _normalized(answer) -> float | None:
-    """Pull 0..1 out of a score answer, whatever shape it arrived in.
+def _normalized(raw) -> float | None:
+    """Pull 0..1 out of a raw score, whatever shape it arrived in.
 
-    The model interpolates across EFFORT_SCALE, so the raw score runs from 0 to
+    The model interpolates across EFFORT_SCALE, so the score runs from 0 to
     len(scale) - 1. Dividing by that span is what makes the stored value
     independent of how many rungs the scale has.
     """
-    raw = answer.get("score") if isinstance(answer, dict) else None
-    if not isinstance(raw, (int, float)):
+    # bool is an int subclass, so it has to be excluded explicitly — a JSON
+    # `true` would otherwise normalize to a real effort score.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
     span = max(1, len(config.EFFORT_SCALE) - 1)
     return max(0.0, min(1.0, raw / span))
+
+
+def _field(answers, name: str, key: str):
+    """One field of one answer, or None if the response was not that shape.
+
+    `answers.get(name, {})` is not enough on its own: a response carrying
+    `"potion": null` returns None, and `None.get` raises AttributeError — which
+    is not one of the exceptions the caller below catches, so a single null in
+    the payload would 500 task creation instead of falling back.
+    """
+    answer = answers.get(name) if isinstance(answers, dict) else None
+    return answer.get(key) if isinstance(answer, dict) else None
 
 
 def _from_classifier(title: str) -> dict:
@@ -140,7 +153,7 @@ def _from_classifier(title: str) -> dict:
         return {}
 
     return {
-        "potion": answers.get("potion", {}).get("choice"),
-        "kind": answers.get("kind", {}).get("choice"),
-        "effort": answers.get("effort", {}),
+        "potion": _field(answers, "potion", "choice"),
+        "kind": _field(answers, "kind", "choice"),
+        "effort": _field(answers, "effort", "score"),
     }

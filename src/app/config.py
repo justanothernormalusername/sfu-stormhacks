@@ -42,6 +42,22 @@ def _read_env(name: str, default: str | None = None) -> str | None:
         pass
     return default
 
+
+def _classifier_key() -> str | None:
+    """The classifier key, or None if the classifier is switched off.
+
+    `CLASSIFIER_API_KEY` set to an empty string means *deliberately off*, and
+    that wins even when a .env file has a key. Without that rule the test suites
+    silently pick up a developer's key, make a live network call every time a
+    quest is created, and assert on a reward the model decided that day — which
+    is exactly the kind of failure that looks like a game bug and is not one.
+    """
+    explicit = os.environ.get("CLASSIFIER_API_KEY")
+    if explicit is not None:
+        return explicit or None
+    return _read_env("KEY")
+
+
 # --- Periods -------------------------------------------------------------
 # Day, month, and week boundaries all follow the player's local clock.
 WEEK_START_DAY = 0  # 0=Monday .. 6=Sunday
@@ -432,7 +448,7 @@ MINI_BOSS = {
 # The key is read from the environment, falling back to a local untracked .env
 # so a teammate can drop a key in a file and go. On Render it is a real
 # environment variable and the file is not there.
-CLASSIFIER_API_KEY = _read_env("CLASSIFIER_API_KEY") or _read_env("KEY")
+CLASSIFIER_API_KEY = _classifier_key()
 CLASSIFIER_MODEL = _read_env("CLASSIFIER_MODEL", "jev-latest")
 CLASSIFIER_URL = "https://ai.hackclub.com/proxy/v1/jev/systemone"
 # Generous, because this runs inline in POST /api/tasks and a reasoning model
