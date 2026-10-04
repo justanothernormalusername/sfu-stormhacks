@@ -341,13 +341,7 @@ class BattleScene extends Phaser.Scene {
     kb.on("keydown-ESC", () => this.choose("flee"));
     kb.on("keydown-SPACE", () => this.choose("continue"));
 
-    if (this.heroHp <= 0) {
-      this.say("You're too exhausted to fight (0 HP).\nComplete any quest this week to recover.");
-      this.over = true;
-      this.result = "exhausted";
-    } else {
-      this.say(`A wild ${enemy.name} appears! It hits for about ${enemy.atk}.`);
-    }
+    this.say(`A wild ${enemy.name} appears! It hits for about ${enemy.atk}.`);
     this.refreshButtons();
   }
 

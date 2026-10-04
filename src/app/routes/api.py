@@ -39,8 +39,6 @@ def own_task(session: Session, user: User, task_id: int) -> Task:
 
 
 def player_stats(session: Session, user: User) -> dict:
-    tasks = session.exec(select(Task).where(Task.user_id == user.id)).all()
-    completions = session.exec(select(Completion).where(Completion.user_id == user.id)).all()
     clears = session.exec(select(RoomClear).where(RoomClear.user_id == user.id)).all()
     items = session.exec(select(Item).where(Item.user_id == user.id)).all()
     xp = sum(c.xp for c in clears)
@@ -51,7 +49,7 @@ def player_stats(session: Session, user: User) -> dict:
         "level": level,
         "xp_this_level": game.xp_for_level(level),
         "xp_next_level": game.xp_for_level(level + 1),
-        "hp": game.hp_for(tasks, completions, utcnow()),
+        "hp": game.MAX_HP,
         "max_hp": game.MAX_HP,
         "atk": 10 + 3 * level + sum(i.atk for i in items),
         "defense": sum(i.defense for i in items),

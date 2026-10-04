@@ -4,7 +4,7 @@ so the game client (Phaser now, maybe Godot later) only renders results."""
 import math
 import os
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .models import Completion, Task
@@ -17,8 +17,6 @@ ENEMY_BY_KIND = {
     "goal": {"tier": "boss", "names": ["Dragon", "Lich King", "Demon Lord"], "hp": 120, "atk": 12},
 }
 MAX_HP = 100
-MISSED_DAILY_DAMAGE = 10
-RECENT_COMPLETION_HEAL = 5
 # Day/month boundaries follow the players' local clock, not UTC (UTC midnight is 5pm in Vancouver).
 TZ = ZoneInfo(os.environ.get("APP_TZ", "America/Vancouver"))
 LOOT_TABLE = [
@@ -60,29 +58,6 @@ def level_for(xp: int) -> int:
 
 def xp_for_level(level: int) -> int:
     return 25 * (level - 1) ** 2
-
-
-def missed_dailies(tasks: list[Task], completions: list[Completion], now: datetime, days: int = 7) -> int:
-    """Count daily tasks skipped on each of the last `days` days (not counting today)."""
-    today = local_date(now)
-    done = {(c.task_id, local_date(c.completed_at)) for c in completions}
-    missed = 0
-    for task in tasks:
-        if task.kind != "daily" or not task.active:
-            continue
-        for offset in range(1, days + 1):
-            day = today - timedelta(days=offset)
-            if day >= local_date(task.created_at) and (task.id, day) not in done:
-                missed += 1
-    return missed
-
-
-def hp_for(tasks: list[Task], completions: list[Completion], now: datetime) -> int:
-    """Skipped dailies in the last week hurt; any quest done in the last week heals."""
-    week_ago = local_date(now) - timedelta(days=7)
-    recent = sum(1 for c in completions if local_date(c.completed_at) > week_ago)
-    hp = MAX_HP - MISSED_DAILY_DAMAGE * missed_dailies(tasks, completions, now) + RECENT_COMPLETION_HEAL * recent
-    return max(0, min(MAX_HP, hp))
 
 
 def enemy_for(task: Task) -> dict:
