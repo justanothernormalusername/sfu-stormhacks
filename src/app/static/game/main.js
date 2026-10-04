@@ -226,8 +226,11 @@ class DungeonScene extends Phaser.Scene {
 
   buildGrid() {
     // One horizontal chain of rooms with short connector walkways between them.
+    // Everything starts as solid rock and rooms/walkways carve into it, so the
+    // dungeon is sealed by construction: there is no void to walk out into, and
+    // no way to skirt a gate through the "outside" of the map.
     const width = this.gridWidth();
-    const grid = Array.from({ length: ROWS }, () => Array(width).fill(" "));
+    const grid = Array.from({ length: ROWS }, () => Array(width).fill("#"));
     const box = (x0, y0, x1, y1, fill) => {
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
@@ -289,9 +292,27 @@ class DungeonScene extends Phaser.Scene {
         for (let y = DOOR_ROW - 1; y <= DOOR_ROW + 1; y++) {
           this.walls.create(exitX, y * T + T / 2, "gate").setDepth(5);
         }
-        this.add.text(exitX - 5, centerY - 44, "LOCKED", {
-          fontFamily: FONT, fontSize: "7px", color: "#e56b6f",
-        }).setOrigin(1, 0.5);
+        // Centred on the gate itself, on a dark plate so it reads against the
+        // bars, and drawn above everything in the room so nothing occludes it.
+        // The padlock is drawn, not typed: the pixel font has no lock glyph and
+        // an emoji would render as a tofu box.
+        this.add.rectangle(exitX, centerY, 30, 34, 0x140f1c, 0.9).setDepth(49);
+        const lock = this.add.graphics().setDepth(50);
+        lock.lineStyle(2, 0xff8b8f);
+        lock.strokeRect(exitX - 5, centerY - 9, 10, 8); // shackle
+        lock.beginPath();
+        lock.arc(exitX, centerY - 9, 5, Math.PI, 0, true);
+        lock.strokePath();
+        lock.fillStyle(0xff8b8f);
+        lock.fillRect(exitX - 5, centerY - 1, 10, 9); // body
+        lock.fillStyle(0x140f1c);
+        lock.fillRect(exitX - 1, centerY + 2, 2, 3); // keyhole
+        this.add
+          .text(exitX, centerY + 12, "LOCKED", {
+            fontFamily: FONT, fontSize: "8px", color: "#ff8b8f", align: "center",
+          })
+          .setOrigin(0.5, 0.5)
+          .setDepth(50);
       }
     }
 
