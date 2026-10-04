@@ -1,11 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="panel narrow">
-  <h1>Enter the Dungeon</h1>
-  <p class="muted">A shared weekly dungeon, twelve rooms deep. Your real-life quests are
-  how you prepare — they pay potions into your pack. There are no locked doors.</p>
+  <div class="login-hero">
+    <span class="mark">⚔</span>
+    <h1>Task Dungeon</h1>
+    <p class="tagline">Twelve rooms. One shared dungeon, every Monday.</p>
+  </div>
+
+  <p class="muted">Your real-life quests are how you prepare — finish one and it
+  pays potions into your pack. There are no locked doors; the potions are how
+  you get deeper.</p>
+
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
-  <form method="post" action="/login">
+
+  <form class="login-form" method="post" action="/login">
     <label>Username <input name="username" autocomplete="username" required></label>
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
     <div class="row">

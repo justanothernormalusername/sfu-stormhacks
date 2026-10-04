@@ -28,6 +28,7 @@ function updateHud(p) {
   document.getElementById("hud-atk").textContent = p.atk;
   document.getElementById("hud-def").textContent = p.defense;
   document.getElementById("hud-depth").textContent = p.checkpoint + 1;
+  if (CFG) document.getElementById("hud-rooms").textContent = CFG.room_count;
 
   const box = document.getElementById("hud-items");
   box.replaceChildren();

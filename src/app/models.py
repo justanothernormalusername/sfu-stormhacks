@@ -24,9 +24,15 @@ class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     title: str
+    # The repeat window, chosen by the classifier rather than the player.
     kind: str  # "daily" | "monthly" | "goal"
-    # Cached at creation time by the categorizer, so gameplay never calls an API.
+    # Both cached at creation time, so gameplay never calls an API.
     potion_category: Optional[str] = None
+    # Classifier's effort score, normalized to 0..1. The potion *count* is
+    # derived from this in config rather than stored, so retuning POTION_MIN /
+    # POTION_MAX re-scales every existing quest. None means the classifier was
+    # unreachable and the quest pays the fallback.
+    difficulty: Optional[float] = None
     active: bool = True
     created_at: NaiveDatetime = Field(default_factory=utcnow)
 

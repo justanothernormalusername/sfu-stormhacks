@@ -130,7 +130,9 @@ check("acting in a safe room is refused", r.status_code == 409, f"got {r.status_
 print("\n=== 6. Potions are earned, spent exactly once, and never client-supplied ===")
 logout()
 login("alchemist")
-client.post("/api/tasks", json={"title": "water the plants", "kind": "daily"})
+# `kind` is no longer sent by the client — the classifier picks the repeat window
+# and the potion count, so the request is a title and nothing else.
+client.post("/api/tasks", json={"title": "water the plants"})
 task = next(t for t in client.get("/api/tasks").json() if t["title"] == "water the plants")
 client.post(f"/api/tasks/{task['id']}/complete", json={"note": "did it"})
 player = client.get("/api/player").json()

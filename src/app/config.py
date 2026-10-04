@@ -14,6 +14,33 @@ is written down at the bottom of that file and the numbers below are tuned to it
 """
 
 import os
+from pathlib import Path
+
+# repo root, so a local .env next to README.md is found from src/app/config.py
+DOTENV = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _read_env(name: str, default: str | None = None) -> str | None:
+    """An environment variable, falling back to a local untracked .env file.
+
+    The file is only ever a developer convenience. It is gitignored, and on a
+    deployed host it does not exist — there the real environment variable is
+    the only source, which is what Render sets.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        for line in DOTENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, raw = line.partition("=")
+            if key.strip() == name:
+                return raw.strip().strip("\"'") or default
+    except OSError:
+        pass
+    return default
 
 # --- Periods -------------------------------------------------------------
 # Day, month, and week boundaries all follow the player's local clock.
@@ -237,14 +264,17 @@ PLAYER_BASE = {
 }
 
 # --- Potions -------------------------------------------------------------
-# Quantity earned per completion, keyed by task kind. The weekly reset is the
-# cap: a daily can pay out at most seven times a week.
-#
-# The ordering matters and is deliberate: a daily (7/week) must out-earn a
-# monthly, and a monthly must out-earn a goal, so the habit is the best deal
-# rather than the one-off. This is the fix for the v1 curve, where a single goal
-# paid 20 days of daily quests.
-POTIONS_BY_KIND = {"daily": 1, "monthly": 2, "goal": 4}
+# How many potions one completion can pay, and the bounds of that range. The
+# player never chooses a number: the classifier scores how much effort the task
+# actually is, and the score is mapped onto MIN..MAX here. Change these two and
+# every existing quest re-scales, because quests store the score, not the count.
+POTION_MIN = 1
+POTION_MAX = 4
+
+# If the classifier cannot be reached, quests fall back to the bottom of the
+# range. Failing closed matters: paying out the maximum on an API outage would
+# mean anyone could improve their week by breaking the network.
+POTION_FALLBACK = POTION_MIN
 
 POTION_CATEGORIES = ("heal", "damage", "haste", "shield")
 
@@ -276,6 +306,40 @@ POTION_CATEGORY_KEYWORDS = {
     "shield": ["protect", "backup", "save", "review", "check", "plan", "prepare",
                "budget", "insurance", "backup", "safety"],
 }
+
+# How the classifier weighs each potion. These descriptions do the real work:
+# the model picks between criteria rather than inventing a label, so "recovery,
+# food, sleep" is a much better signal for Heal than the bare word "heal".
+POTION_CATEGORY_CRITERIA = {
+    "heal": "rest, recovery, food, water, sleep, stretching, looking after yourself",
+    "damage": "training, effort, pushing hard, focused deep work, attacking a deadline",
+    "haste": "speed, urgency, clearing a backlog, finishing something quickly",
+    "shield": "protecting yourself, reviewing, planning, saving up, preparing for later",
+}
+
+# The classifier picks the repeat window too, so the player never chooses one.
+# Each option describes how often someone would genuinely do this, which is the
+# judgement we want rather than "whatever the user felt like clicking".
+KIND_CRITERIA = {
+    "daily": "a daily habit, done most days",
+    "monthly": "a recurring chore, done roughly once a month",
+    "goal": "a one-off achievement, done once and finished",
+}
+
+# The effort scale handed to the classifier as an ordered list. It answers with
+# a continuous score across these indices, which is normalized to 0..1 and then
+# mapped onto POTION_MIN..POTION_MAX. Ordered least effort to most.
+EFFORT_SCALE = [
+    "takes seconds",
+    "a few minutes",
+    "a real chunk of an evening",
+    "most of a day",
+    "a multi-day effort",
+]
+
+# Fallbacks for each field the classifier fills in, applied independently when
+# it cannot be reached. See POTION_FALLBACK for why the effort one fails low.
+DEFAULT_KIND = "daily"
 
 # --- Combat --------------------------------------------------------------
 # One damage formula for everything: roll a flat variance band, apply the
@@ -364,9 +428,16 @@ MINI_BOSS = {
 # --- Classifier (optional) ------------------------------------------------
 # The categorizer falls back to keywords when these are unset or the call
 # fails. Never let this take down task creation.
-CLASSIFIER_API_KEY = os.environ.get("CLASSIFIER_API_KEY")
-CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL")
-CLASSIFIER_BASE_URL = "https://openrouter.ai/api/v1"
-CLASSIFIER_TIMEOUT = 2.0
+#
+# The key is read from the environment, falling back to a local untracked .env
+# so a teammate can drop a key in a file and go. On Render it is a real
+# environment variable and the file is not there.
+CLASSIFIER_API_KEY = _read_env("CLASSIFIER_API_KEY") or _read_env("KEY")
+CLASSIFIER_MODEL = _read_env("CLASSIFIER_MODEL", "jev-latest")
+CLASSIFIER_URL = "https://ai.hackclub.com/proxy/v1/jev/systemone"
+# Generous, because this runs inline in POST /api/tasks and a reasoning model
+# is slower than a plain completion. Still bounded: the keyword path is
+# instant, and a timeout just means we fall back to it.
+CLASSIFIER_TIMEOUT = 6.0
 
 KIND_LABEL = {"daily": "Daily", "monthly": "Monthly", "goal": "Goal"}

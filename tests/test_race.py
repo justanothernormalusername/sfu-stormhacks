@@ -85,7 +85,7 @@ check("the fight resolved rather than hanging",
       "fight still live after every thread had a turn")
 
 # --- Potion integrity: the real prize. Concurrent drinks must not multiply rows.
-main.post("/api/tasks", json={"title": "race chore", "kind": "daily"})
+main.post("/api/tasks", json={"title": "race chore"})
 task = next(t for t in main.get("/api/tasks").json() if t["title"] == "race chore")
 main.post(f"/api/tasks/{task['id']}/complete", json={"note": "ok"})
 held = main.get("/api/player").json()["potions_total"]

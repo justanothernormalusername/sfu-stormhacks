@@ -2,9 +2,19 @@
 {% block title %}Dungeon · Task Dungeon{% endblock %}
 {% block content %}
 <div id="hud" class="panel">
-  <span>Depth <b id="hud-depth">1</b></span>
-  <span>HP <span class="bar"><div id="hp-fill"></div></span> <span id="hud-hp"></span></span>
-  <span>ATK <b id="hud-atk"></b> · DEF <b id="hud-def"></b></span>
+  <span class="hud-stat">
+    <span class="hud-label">Room</span>
+    <span class="hud-value"><b id="hud-depth">1</b> / <b id="hud-rooms">—</b></span>
+  </span>
+  <span class="hud-stat">
+    <span class="hud-label">HP</span>
+    <span class="bar"><div id="hp-fill"></div></span>
+    <span class="hud-value" id="hud-hp"></span>
+  </span>
+  <span class="hud-stat">
+    <span class="hud-label">Atk</span><span class="hud-value" id="hud-atk"></span>
+    <span class="hud-label">Def</span><span class="hud-value" id="hud-def"></span>
+  </span>
   <span id="hud-items"></span>
 </div>
 <div id="game"></div>

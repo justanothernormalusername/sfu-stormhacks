@@ -17,7 +17,7 @@ import random
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import config
+from . import categorize, config
 from .models import Completion, Task
 
 KINDS = ("daily", "monthly", "goal")
@@ -495,7 +495,7 @@ def inventory(completions: list[Completion], tasks_by_id: dict[int, Task],
             # potions out of nothing.
             continue
         category = task.potion_category or config.DEFAULT_CATEGORY
-        amount = config.POTIONS_BY_KIND.get(task.kind, 0)
+        amount = potions_for(task)
         earned[category] = earned.get(category, 0) + amount
 
     for use in uses:
@@ -509,6 +509,10 @@ def inventory(completions: list[Completion], tasks_by_id: dict[int, Task],
     return {k: max(0, v) for k, v in earned.items() if v > 0}
 
 
-def potions_earned_for(completion: Completion, task: Task) -> int:
-    """How many potions a single completion pays out, and in what category."""
-    return config.POTIONS_BY_KIND.get(task.kind, 0)
+def potions_for(task: Task) -> int:
+    """How many potions one completion of this task pays.
+
+    Derived from the classifier's cached effort score against the bounds in
+    config, so the economy is retunable without touching stored data.
+    """
+    return categorize.potions_for(task.difficulty)

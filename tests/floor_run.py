@@ -23,7 +23,7 @@ c.post("/login", data={"username": "delver", "password": "hunter22", "action": "
 
 # Earn potions the honest way, so the run is budgeted the way a real week is.
 for i in range(8):
-    c.post("/api/tasks", json={"title": f"chore {i}", "kind": "daily"})
+    c.post("/api/tasks", json={"title": f"chore {i}"})
 for t in c.get("/api/tasks").json():
     c.post(f"/api/tasks/{t['id']}/complete", json={"note": "ok"})
 print("potions earned:", c.get("/api/player").json()["potions_total"])
