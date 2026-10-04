@@ -153,7 +153,9 @@ def get_config(user: User = Depends(current_user)):
     """
     return {
         "player": config.PLAYER_BASE,
-        "room_count": config.ROOM_COUNT,
+        # Derived from the authored floor rather than a separate constant, so
+        # the number the HUD shows cannot drift from the map that was built.
+        "room_count": len(config.FLOOR_ROOMS),
         "potion_min": config.POTION_MIN,
         "potion_max": config.POTION_MAX,
         "potion_effects": config.POTION_EFFECTS,
