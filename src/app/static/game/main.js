@@ -375,6 +375,11 @@ class BattleScene extends Phaser.Scene {
     this.room = data.room;
     this.stats = data.player;
     this.retreatPoint = data.retreatPoint;
+    this.fight = null;
+    this.result = null;
+    this.over = false;
+    this.busy = false;
+    this.settling = false;
   }
 
   create() {
@@ -597,7 +602,7 @@ class BattleScene extends Phaser.Scene {
       if (this.fight.state === "fled") {
         this.over = true;
         this.result = "fled";
-        return this.refresh();
+        return this.finish();
       }
       if (result.resolved?.cleared) this.win();
       else if (result.resolved && !result.resolved.cleared) this.lose();

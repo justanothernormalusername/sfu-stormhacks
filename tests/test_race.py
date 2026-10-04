@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from src.app.db import engine, init_db  # noqa: E402
 from src.app.main import app  # noqa: E402
-from src.app.models import PotionUse, User  # noqa: E402
+from src.app.models import Completion, PotionUse, User  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
 init_db()
@@ -127,6 +127,29 @@ check("at most one drink per potion held", accepted <= held,
       f"{accepted} accepted with {held} held")
 check("PotionUse rows match the accepted requests",
       rows == accepted, f"{rows} rows vs {accepted} accepted")
+
+# --- Quest integrity: repeated completion requests must award once.
+main.post("/api/tasks", json={"title": "concurrent quest"})
+task = next(t for t in main.get("/api/tasks").json() if t["title"] == "concurrent quest")
+
+
+def complete(_: int) -> int:
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.update(main.cookies)
+    return client.post(f"/api/tasks/{task['id']}/complete", json={"note": "done"}).status_code
+
+
+with ThreadPoolExecutor(max_workers=THREADS) as pool:
+    completion_status = list(pool.map(complete, range(THREADS)))
+with Session(engine) as session:
+    completion_rows = len(session.exec(
+        select(Completion).where(Completion.task_id == task["id"])).all())
+print(f"\n=== {THREADS} concurrent completions of one quest ===")
+print(f"  statuses: {sorted(set(completion_status))}   Completion rows: {completion_rows}")
+check("only one completion request succeeds", completion_status.count(200) == 1,
+      f"accepted {completion_status.count(200)}")
+check("only one completion row is written", completion_rows == 1,
+      f"wrote {completion_rows}")
 
 print("\n" + "=" * 60)
 if check.failures:

@@ -212,6 +212,20 @@ else:
     check("boss HP never exceeds the ceiling", boss_room["enemy"]["hp"] <= cap,
           f"enemy {boss_room['enemy']['hp']} > cap {cap}")
 
+print("\n=== 9. Archiving a quest does not confiscate its reward ===")
+login("archiver")
+c.post("/api/tasks", json={"title": "archive reward test"})
+task = next(t for t in c.get("/api/tasks").json() if t["title"] == "archive reward test")
+c.post(f"/api/tasks/{task['id']}/complete", json={"note": "done"})
+before = c.get("/api/player").json()["potions_total"]
+c.delete(f"/api/tasks/{task['id']}")
+after = c.get("/api/player").json()["potions_total"]
+check("earned potions survive archiving", before > 0 and after == before,
+      f"before={before}, after={after}")
+again = c.post(f"/api/tasks/{task['id']}/complete", json={"note": "again"})
+check("an archived quest cannot be completed through the API", again.status_code == 409,
+      f"got {again.status_code}")
+
 print("\n" + "=" * 60)
 if failures:
     print(f"FAILED: {failures}")

@@ -52,3 +52,35 @@ for (const room of dungeon.rooms) {
   dungeon.startBattle(room);
 }
 console.log("Spawn checks passed for fleeing, errors, death, and victory in every room.");
+
+// Reuse the same scene, as Phaser does. Escape must return immediately after
+// the server closes the fight, without a second keypress or stale result state.
+(async () => {
+  const battle = new BattleScene();
+  let requests = 0;
+  let returns = 0;
+  context.api = async (path, options) => {
+    requests++;
+    assert.equal(path, "/api/rooms/1/act");
+    assert.equal(options.body.action, "flee");
+    return { fight: { state: "fled" } };
+  };
+  battle.applyFight = (result) => { battle.fight = result.fight; battle.busy = false; };
+  battle.scene = { start(scene, data) {
+    returns++;
+    assert.equal(scene, "boot");
+    assert.equal(data.spawnPoint.x, 240);
+    assert.equal(data.spawnPoint.y, 240);
+    assert.equal(data.spawnRoom, undefined);
+  } };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    battle.init({ room: { index: 1 }, player: {}, retreatPoint: { x: 240, y: 240 } });
+    assert.equal(battle.result, null);
+    assert.equal(battle.fight, null);
+    assert.equal(battle.over, false);
+    await battle.choose("flee");
+    assert.equal(requests, attempt + 1);
+    assert.equal(returns, attempt + 1);
+  }
+  console.log("Repeated flee actions return immediately without pressing Space.");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
