@@ -215,9 +215,18 @@ FLOOR_LINKS = (
 # deals more damage than the player can regenerate in the same time, so the only
 # answer is a potion — the potions stop being a choice and become the answer.
 # 138 was measured rather than guessed: tools/tune_boss.py sweeps this value and
-# reports boss win rates, and 138 sits in the 55-85% band at a three-potion budget.
+# reports boss win rates, and 138 sat in the 55-85% band at a three-potion budget.
 # Re-run it rather than picking a number by feel.
-DEFAULT_BOSS_HP_CAP: int | None = 138
+#
+# 138 -> 142, a deliberately *small* move, and that is the whole point. The steeper
+# curve above already makes the boss a longer fight without touching this number,
+# because the cap binds: the curve now asks for ~190 at depth 10 and gets clamped
+# to 142. Only the sliver above the cap is the boss's own new contribution.
+# Measured on the steeper curve, 142 holds the three-potion boss fight at 55.7%
+# (baseline 45.7%) while 146 drops it to 44.3% and 150 to 41.4% — past ~145 the
+# cap stops buying difficulty and starts just deleting the win. Two points of HP
+# against a much steeper climb is the whole increase.
+DEFAULT_BOSS_HP_CAP: int | None = 142
 BOSS_HP_CAP: int | None = _boss_hp_cap()
 
 # What each kind of room *is*, mechanically. `hp_mult` / `atk_mult` scale the
@@ -256,7 +265,13 @@ ROOM_ARCHETYPES = {
         # floor's designed "somewhere to breathe" beat belongs. Raising it fixes
         # the arrival problem without softening the boss itself, which is what
         # we actually want to be hard.
-        "restore": 58,
+        #
+        # 58 -> 86, and this is the other half of the steeper curve. With the
+        # climb now genuinely escalating, the depth-5 shrine is what keeps the
+        # back half from arriving at the boss already decided. Measured pre-boss
+        # HP at a three-potion budget goes from ~62 to ~86 of 125, and the boss
+        # fight gets to be hard because the walk-up no longer spends the bar.
+        "restore": 86,
         "blurb": "A dead technician's coolant still trickles. Stand in it. Once.",
     },
     "elite": {
@@ -267,11 +282,20 @@ ROOM_ARCHETYPES = {
         # *boss* unwinnable (15%) rather than making the mini-bosses satisfying.
         # They now apply real pressure (a player can lose here) without
         # pre-spending the resource the boss fight is supposed to test.
-        "tier": "mini-boss", "safe": False, "hp_mult": 1.5, "atk_mult": 1.28,
+        #
+        # 1.5 -> 1.58 and 1.7 -> 1.78. The steep curve is what makes these fights
+        # long; this is the small bump that makes them *feel* like set pieces
+        # rather than long mobs. Measured at a three-potion budget it costs ~3
+        # points of floor clear rate and nothing measurable at four or seven —
+        # which is the trade the earlier passes got wrong by going to 1.8/2.1.
+        "tier": "mini-boss", "safe": False, "hp_mult": 1.58, "atk_mult": 1.28,
         "blurb": "It has been waiting at the top of the stairs, and it has not been idle.",
     },
     "gate": {
-        "tier": "mini-boss", "safe": False, "hp_mult": 1.7, "atk_mult": 1.34,
+        # 1.7 -> 1.78, matching the elite above. The gate is the last fight before
+        # the boss and the one most likely to be the run-ender, so it scales with
+        # the elite rather than staying on the old curve's arithmetic.
+        "tier": "mini-boss", "safe": False, "hp_mult": 1.78, "atk_mult": 1.34,
         "blurb": "The last thing between you and the root. It knows you are coming.",
     },
     "boss": {
@@ -312,8 +336,22 @@ ROOM_ARCHETYPES = {
 # that difficulty compounds: raising the curve and cutting the clear-heal in the
 # same pass multiplies rather than adds. The curve is back near its old shape and
 # the difficulty is concentrated where the player feels it — the named fights.
-ENEMY_HP = {"base": 24.0, "per_depth": 4.8}
-ENEMY_ATK = {"base": 4.1, "per_depth": 0.52}
+# 4.8 -> 6.4 per depth, with `base` dropped 24 -> 17 to pay for it. A steeper curve
+# means the *ratio* between the first room and the last, not simply "more HP
+# everywhere": at the old numbers a depth-2 mob was 34% of the boss's HP, and it is
+# now 21%. The low base is what buys that — early rooms stay a genuine warm-up
+# (a depth-1 mob lands at 28 HP against a 12 ATK hero, a two-tapping) while the
+# back half genuinely escalates.
+#
+# The ATK slope stays nearly flat (4.8/0.52 -> 4.2/0.50) on purpose, and this is
+# the load-bearing asymmetry of the whole change. HP steepness makes fights
+# *longer*; ATK steepness makes every one of those extra turns *hurt more*, and
+# the two multiply. Steepening both together is what turned the floor into a wall
+# in an earlier pass (7.5% clear at three potions, 0% at two): the bar was empty
+# before the boss rather than the boss being hard. Length is the interesting
+# axis — it makes the climb cost something without making it unaffordable.
+ENEMY_HP = {"base": 17.0, "per_depth": 6.4}
+ENEMY_ATK = {"base": 4.2, "per_depth": 0.5}
 
 # --- Weekly modifier (one per week, identical for every player) -------------
 # One week's weather. Seeded from the week, identical for every player, so the
@@ -503,7 +541,15 @@ MIN_DAMAGE = 1
 #
 # Still bounded: at 20 the first half of the floor became free and the boss had to
 # carry the entire difficulty budget alone, which reads as a cliff, not a ramp.
-ROOM_CLEAR_HEAL = 12
+#
+# 12 -> 32, and this is the direct counterweight to the steeper curve. Every room
+# is now a longer fight, so the per-room payback has to scale with it — otherwise
+# the nine rooms before the boss compound into an empty health bar and the boss
+# stops mattering. Measured without this change, arrival at the boss collapsed to
+# ~3 of 125 HP. It is a *rate* change rather than a difficulty removal: the bar
+# still trends downward across the floor, it just trends down at a survivable
+# slope, and the named fights are where a run is actually decided.
+ROOM_CLEAR_HEAL = 32
 
 # Hard ceiling on a single turn's damage. Without it, high-variance + crit +
 # power + rage can one-shot a boss, which reads as a bug and skips the fight the
