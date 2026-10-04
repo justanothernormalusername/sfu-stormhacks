@@ -99,7 +99,7 @@ MIN_DAMAGE = 1
 # fails. Never let this take down task creation.
 CLASSIFIER_API_KEY = os.environ.get("CLASSIFIER_API_KEY")
 CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL")
-CLASSIFIER_BASE_URL = "https://openrouter.ai/api/v1"
+CLASSIFIER_BASE_URL = "https://ai.hackclub.com/proxy/v1"
 CLASSIFIER_TIMEOUT = 2.0
 
 KIND_LABEL = {"daily": "Daily", "monthly": "Monthly", "goal": "Goal"}

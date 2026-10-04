@@ -122,6 +122,7 @@ def get_config(user: User = Depends(current_user)):
     """
     return {
         "player": config.PLAYER_BASE,
+        "room_count": config.ROOM_COUNT,
         "potions_by_kind": config.POTIONS_BY_KIND,
         "potion_effects": config.POTION_EFFECTS,
         "potion_categories": list(config.POTION_CATEGORIES),
