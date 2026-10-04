@@ -339,12 +339,32 @@ def _enter_room(room_index: int, user: User, session: Session, start) -> dict:
     if room["safe"]:
         restored = 0
         if room.get("restore"):
+            # Heal from the HP the run has actually reached, not from a full bar.
+            # A player who walks past the shrine and doubles back is still carrying
+            # the damage from the deepest fight, and `current_hp` reads exactly
+            # that — so a top-up here has to start from it.
+            before = current_hp(session, user, start)
+            after = min(config.PLAYER_BASE["max_hp"], before + room["restore"])
+            # Report what was actually healed. The remaining headroom can be less
+            # than `restore`, and the client prints this number, so reporting the
+            # nominal value would describe a heal the player did not receive.
+            restored = after - before
             # A clear records shrine use until death or the weekly reset.
             session.add(BattleClear(user_id=user.id, week_start=start,
-                                    room_index=room_index,
-                                    hp_after=config.PLAYER_BASE["max_hp"]))
+                                    room_index=room_index, hp_after=after))
+            # HP lives on the furthest cleared row, so a shrine behind the frontier
+            # would record a heal that nothing ever reads back. Carry the healed
+            # value forward onto that row when the shrine is not itself the latest.
+            last = session.exec(
+                select(BattleClear).where(
+                    BattleClear.user_id == user.id, BattleClear.week_start == start,
+                    BattleClear.room_index > room_index,
+                ).order_by(BattleClear.room_index.desc())
+            ).first()
+            if last is not None:
+                last.hp_after = max(last.hp_after, after)
+                session.add(last)
             session.commit()
-            restored = room["restore"]
         return {"room": room, "safe": True, "restored": restored,
                 "player": player_stats(session, user)}
 

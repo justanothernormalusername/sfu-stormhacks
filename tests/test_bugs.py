@@ -68,6 +68,57 @@ r2 = c.post(f"/api/rooms/{shrine['index']}/enter")
 check("second rest is refused cleanly, not a 500",
       r2.status_code == 409, f"got {r2.status_code} {r2.text[:140]}")
 
+print("\n=== 1b. The shrine heals what it says, and the heal survives walking past it ===")
+# Two ways this was wrong, both invisible from the happy path because a full-HP
+# player heals the right amount by accident:
+#   * it wrote `max_hp` while reporting `restore`, so the HUD claimed "+58" and
+#     the player got a whole bar;
+#   * HP is read from the *furthest* cleared row, so a shrine used after walking
+#     past it recorded a heal nothing ever read back — the run gained nothing
+#     while the client said it had.
+# The invariant that covers both: `restored` must equal the HP actually gained.
+SHRINE = next(r["index"] for r in floor["rooms"] if r["safe"] and r.get("restore"))
+MAX_HP = config.PLAYER_BASE["max_hp"]
+
+
+def seed_route(indices, hp):
+    """Write clear rows directly, so the heal is tested independently of combat."""
+    username = c.get("/api/player").json()["username"]
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.username == username)).one()
+        for index in indices:
+            session.add(BattleClear(user_id=user.id, week_start=game.week_start(utcnow()),
+                                    room_index=index, hp_after=hp))
+        session.commit()
+
+
+def current_hp() -> int:
+    return c.get("/api/player").json()["hp"]
+
+
+for label, route, start_hp in [("shallow and wounded", [1, 2, 3], 40),
+                               ("deep and wounded", [1, 2, 3, 7, 8, 9], 40),
+                               ("deep and healthy", [1, 2, 3, 7, 8, 9], MAX_HP),
+                               ("nearly full", [1, 2, 3, 7, 8, 9], MAX_HP - 10),
+                               ("already full", [1, 2, 3], MAX_HP)]:
+    login(f"heal-{label.replace(' ', '-')}")
+    seed_route(route, start_hp)
+    before = current_hp()
+    rested = c.post(f"/api/rooms/{SHRINE}/enter").json()
+    after = current_hp()
+    check(f"{label}: the reported heal is the heal granted",
+          rested["restored"] == after - before,
+          f"reported {rested['restored']}, granted {after - before}")
+    check(f"{label}: HP never goes down and never overflows",
+          before <= after <= MAX_HP, f"{before} -> {after} (max {MAX_HP})")
+
+login("heal-depth")
+seed_route([1, 2, 3], 40)
+c.post(f"/api/rooms/{SHRINE}/enter")
+check("resting does not advance depth",
+      c.get("/api/player").json()["furthest_room"] == 3,
+      f"got {c.get('/api/player').json()['furthest_room']}")
+
 print("\n=== 2. Acting on a room never entered is refused, not a 500 ===")
 login("ghost")
 r = c.post("/api/rooms/5/act", json={"action": "attack"})
