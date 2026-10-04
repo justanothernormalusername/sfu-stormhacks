@@ -19,20 +19,52 @@ This is not just tidiness. It means the client cannot cheat by editing a number 
 ## Run locally
 
 ```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt   # macOS/Linux: .venv/bin/python
-.venv/Scripts/python -m uvicorn src.app.main:app --reload
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+SECRET_KEY=dev .venv/bin/python -m uvicorn src.app.main:app --reload
 ```
 
 Run it from the repo root so `src.app` imports resolve. Open http://127.0.0.1:8000, click **New hero** to register, add quests on the Quest Board, press **I did it**, then head to the Dungeon.
 
 Every balance number — enemy HP and damage, potion effects, crit chance, room count, tier splits — lives in `src/app/config.py` and nowhere else. The server publishes them at `/api/config` and the client renders with those values, so changing one number there moves the whole game.
 
+## Combat is server-authoritative
+
+The client sends an action name and renders what comes back. It never computes damage, never decides whether it won, and cannot claim HP it did not have — there is no `hp` field in the request body to claim with.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/rooms/{i}/enter` | Opens a fight. Enemy stats, your HP, and the fight seed are all decided server-side. |
+| `POST /api/rooms/{i}/act` | One player action plus the enemy turn, resolved by `game.fight_step`. |
+
+The seed never leaves the server, so a player cannot compute the fight locally and skip the turns they would have lost. Fights are held in memory keyed by `(user, room, week)` and mutated under a per-fight lock, so two concurrent requests cannot double-spend a potion or skip a turn.
+
+Wins, defeats, and potion spends are written as append-only rows as they happen — not when a client says the fight ended.
+
+## Tests and balance tooling
+
+```bash
+./run_tests.sh                                    # the four suites that gate a change
+PYTHONPATH=. .venv/bin/python tests/floor_run.py # play a whole floor through the API
+PYTHONPATH=. .venv/bin/python -m tools.balance   # Monte-Carlo clear rates by potion budget
+```
+
+`tools/balance.py` plays the real floor with the real rules and checks clear rates against design targets, exiting non-zero if a band is missed. **Run it after touching anything in the `PLAYER_`, `POTION_`, `ENEMY_`, or `ROOM_ARCHETYPES` blocks in `config.py`.** It takes about two minutes.
+
+Two things worth knowing before you retune, both learned the hard way:
+
+- **Difficulty compounds multiplicatively.** Raising the depth curve, buffing every archetype, *and* cutting `ROOM_CLEAR_HEAL` in one pass made the floor unwinnable at every potion budget. Change one lever, measure, repeat.
+- **Tune the boss against the HP a player actually arrives with**, not a full bar. `tests/where_do_they_die.py` reports that number; tuning against 125 HP produces a boss that is unwinnable in practice.
+
+`tools/tune_boss.py` sweeps the boss HP cap and prints measured win rates, so the value is chosen from data.
+
 ## Stack
 
-FastAPI + SQLModel (SQLite locally, Postgres in production), Jinja pages, and a [Phaser 3](https://phaser.io) game loaded from a CDN (no build step). Placeholder pixel art is drawn in code in `src/app/static/game/main.js` (`makeTextures`). Game rules are pure and side-effect-free in `src/app/game.py`, so they can be tested without a server: `.venv/Scripts/python .smoke/check_rules.py`.
+FastAPI + SQLModel (SQLite locally, Postgres in production), Jinja pages, and a [Phaser 3](https://phaser.io) game loaded from a CDN (no build step). Placeholder pixel art is drawn in code in `src/app/static/game/main.js` (`makeTextures`). Game rules are pure and side-effect-free in `src/app/game.py`, so they can be tested without a server.
 
 There are no migrations — tables are created on startup. Changing the schema means deleting `dungeon.db`.
+
+Note: in-progress fights live in process memory, so **run a single worker**. Multiple workers would each hold a different copy of a fight, and a player's turn would land on a worker that has never heard of their fight.
 
 ## Deploy (Render + mylost.tech)
 
